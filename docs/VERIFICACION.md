@@ -44,7 +44,7 @@ La copia de uso pasa integridad/FK y queda sin usuarios o capturas de prueba. SQ
 
 ## Archivos y decisiones
 
-`apps/web`, `apps/api`, `packages/shared`: implementación funcional; seis migraciones; pruebas API y Playwright; scripts portables; `.env.example`, README y documentación; Dockerfile/Compose/Caddy. Git incluye commits locales de fase 0 e implementación, más documentación/despliegue. No se envió el código automáticamente al remoto.
+`apps/web`, `apps/api`, `packages/shared`: implementación funcional; seis migraciones; pruebas API y Playwright; scripts portables; `.env.example`, README y documentación; Dockerfile/Compose/Caddy. Git incluye commits locales de fase 0 e implementación, más documentación/despliegue. El código se entregó en la rama de trabajo `codex/web-pesca-v0.1.0` del repositorio, conservando `main`.
 
 Los avisos de anotaciones de comentarios de Zod durante build no impidieron compilar. La división por rutas evita un único bundle grande. No se instaló un servicio cloud obligatorio.
 
