@@ -1,0 +1,14 @@
+{
+  "source_records": 926,
+  "reference_taxa": 932,
+  "initial_selection": 62,
+  "continental_entries": 22,
+  "by_category": {
+    "cephalopod": 59,
+    "crustacean": 156,
+    "fish": 717
+  },
+  "aggregate_or_unresolved": 17,
+  "reference_entries_missing_a_language": 73,
+  "complete_inventory": false
+}
