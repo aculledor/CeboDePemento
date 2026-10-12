@@ -1,17 +1,30 @@
-# Estado de desarrollo
+# Estado de la versión 0.1.0
 
-## Fase 0
+| Fase | Implementación |
+| --- | --- |
+| 0 | Monorepo, Node 24, React/Vite, Fastify, copia segura del catálogo, migraciones y scripts Windows |
+| 1 | Usuarios, Argon2id, invitaciones/recuperación, cookies, CSRF, límites, permisos, auditoría, idempotencia y backups |
+| 2 | Catálogo bilingüe, buscador/alias, CRUD por desactivación, taxonomía, revisión, descripciones y tallas con control de versiones |
+| 3 | Subida real, WebP/miniatura, EXIF eliminado, créditos, candidatas Commons/iNaturalist, aprobación/rechazo e imagen principal |
+| 4 | Sesiones activas/históricas, lotes, medidas, fotos, edición, referencias de talla conservadas/corregibles, propuestas y archivo lógico |
+| 5 | Ligas abiertas/privadas, invitaciones, reglas y periodos versionados, plantillas copiadas, puntos, rankings y explicaciones recalculados |
+| 6 | Perfiles/comunidad, periodos, horas sin solapamiento, jornadas DST, pesos desconocidos, récords/especies exclusivas, mapa y 21 zonas editables |
+| 7 | Docker construido y arrancado, Compose/Caddy, persistencia, backups diarios comprobados y restauración a destinos nuevos |
 
-Monorepo, Node 24, dependencias, TypeScript, React/Vite + API/Fastify, contratos compartidos, apertura segura del catálogo, migraciones con checksum y backup. Catálogo inicial paginado con búsqueda real multilingüe, filtros y ficha. Interfaz móvil gl/es con estados de carga/error. Scripts e instrucciones Windows y acceso móvil por LAN.
+## Pendiente de operación y revisión de contenido
 
-## Siguientes fases
+- Instalar y comprobar físicamente Windows 11, Android/iPhone y acceso desde otra red. La verificación de navegador disponible se hizo en Chromium a 390 × 844.
+- Configurar tu dominio, DNS, router o túnel y desplegar en tu servidor doméstico. La imagen se verificó localmente; no se publicó un servicio en Internet.
+- Revisar/importar fotografías reales de las 62 iniciales. Las APIs externas están bloqueadas en este entorno; las integraciones están probadas con fixtures y la subida manual con archivos reales.
+- Situar las zonas con coordenadas revisadas. Sus textos vienen del PDF, pero no se inventaron posiciones.
+- Revisar progresivamente presencia local, nomenclatura, traducciones que faltan y referencias de talla. Los registros de referencia no se declaran un inventario completo.
 
-1. Modelo ampliado, Argon2id, invitaciones/recuperación, cookies, CSRF, permisos, auditoría e idempotencia.
-2. Administración real del catálogo, tallas de referencia, alias y revisión.
-3. Fotos: candidatos externos, aprobación y subida manual sanitizada.
-4. Sesiones y lotes, edición retrospectiva y propuestas aprobables.
-5. Ligas y motor de puntos versionado/recalculable.
-6. Estadísticas, jornadas Europe/Madrid y zonas/mapas online.
-7. Docker/Caddy, backups/restauración y verificaciones de dispositivos/despliegue.
+## Decisiones de comportamiento
 
-Las pantallas futuras no se presentan como funcionales ni se simulan con datos ficticios.
+- Guardado confirmado por POST/PATCH o consulta del resultado idempotente; sin estados optimistas. Tras perder la respuesta, el formulario conserva la operación en memoria y bloquea cambios hasta consultar/reintentar expresamente.
+- No hay cola offline, IndexedDB o service worker. TanStack Query usa `networkMode: always` y sin reintentos de escrituras para impedir operaciones pausadas que se envíen al recuperar la red.
+- Una captura conserva su referencia de talla. Actualizarla exige una corrección explícita del propietario; queda auditada y afecta los resultados posteriores.
+- Una versión histórica de reglas se aplica a las capturas actuales, incluidas correcciones históricas, y utiliza el periodo guardado con esa versión. La auditoría conserva los cambios de datos.
+- Ranking: puntos, cantidad admitida y luego ID estable. Especies genéricas no cuentan para diversidad ni exclusivas.
+- Archivar sesiones/lotes no elimina filas, fotos ni claves históricas; se excluyen de API visible, estadísticas y ligas.
+- El idioma es la única preferencia persistida en el navegador. Los registros permanecen en SQLite.
