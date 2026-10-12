@@ -15,7 +15,11 @@ winget install Git.Git
 
 Abre una nueva terminal y comprueba `node --version` (24.x) y `git --version`. Si el instalador LTS ofrece otra versión mayor, descarga Node 24 desde https://nodejs.org/en/download.
 
-**Si recibiste el ZIP**, descomprímelo y entra en su carpeta `CeboDePemento`. El ZIP incluye esta implementación; los commits locales no se han enviado automáticamente a GitHub. Clonar el remoto antes de incorporar esos commits solo descarga su estado anterior.
+**Código entregado en la rama `codex/web-pesca-v0.1.0`**. Puedes descargar su ZIP desde GitHub y entrar en la carpeta descomprimida, o clonar esa rama:
+
+```powershell
+git clone --branch codex/web-pesca-v0.1.0 https://github.com/aculledor/CeboDePemento.git
+```
 
 ```powershell
 cd CeboDePemento

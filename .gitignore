@@ -8,3 +8,5 @@ work/
 *.sqlite-wal
 *.sqlite-shm
 coverage/
+
+output/
