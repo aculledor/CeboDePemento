@@ -2,8 +2,14 @@
   "name": "cebo-de-pemento",
   "version": "0.1.0",
   "private": true,
-  "workspaces": ["apps/*", "packages/*"],
-  "engines": {"node": ">=24 <25"},
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "setup": "npm run build -w @cebo/shared && npm run db:migrate",
     "predev": "npm run setup",
@@ -11,9 +17,20 @@
     "build": "npm run build -w @cebo/shared && npm run build -w @cebo/api && npm run build -w @cebo/web",
     "typecheck": "npm run build -w @cebo/shared && npm run typecheck --workspaces --if-present",
     "test": "npm run build -w @cebo/shared && npm run test --workspaces --if-present",
+    "test:browser": "npm run build && playwright test",
     "db:migrate": "npm run migrate -w @cebo/api",
     "db:backup": "npm run backup -w @cebo/api",
+    "db:restore": "node --import tsx scripts/restore.ts",
+    "admin:create": "npm run admin -w @cebo/api --",
+    "invite:create": "npm run invite -w @cebo/api --",
+    "recovery:create": "npm run recovery -w @cebo/api --",
     "start": "npm run start -w @cebo/api"
   },
-  "devDependencies": {"concurrently": "^9.2.1", "typescript": "^5.9.3", "@types/node": "^24.0.0"}
+  "devDependencies": {
+    "@playwright/test": "^1.64.0",
+    "@types/node": "^24.0.0",
+    "concurrently": "^9.2.1",
+    "prettier": "^3.9.10",
+    "typescript": "^5.9.3"
+  }
 }
