@@ -1,0 +1,90 @@
+name: Validar y publicar Cebo de Pemento AMD64
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: cebo-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: "24.19.0", cache: npm }
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck && npm test && npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test
+      - run: python3 -m unittest discover -s tests -p test_nuc_deploy.py -v
+      - name: Validar manifiestos y catálogo original
+        env: { APP_IMAGE: "cebo-pemento:ci", LAN_IP: "127.0.0.1" }
+        run: |
+          docker compose config --quiet
+          docker compose -f compose.yaml -f compose.build.yaml config --quiet
+          git diff --exit-code -- catalogo.sqlite schema.sql seed.sql referencia_xunta.json referencia_continental.json resumen.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          {
+            name: browser-diagnostics,
+            path: work/browser-results,
+            retention-days: 7,
+          }
+  image:
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Construir y probar la imagen sin publicarla
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: cebo-pemento:ci
+          build-args: REVISION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: bash scripts/docker-smoke.sh cebo-pemento:ci
+      - name: Login GHCR (solo main, nunca PR)
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publicar imagen revisada con procedencia y SBOM
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        id: publish
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/aculledor/cebo-de-pemento:sha-${{ github.sha }}
+          build-args: REVISION=${{ github.sha }}
+          cache-from: type=gha
+          provenance: true
+          sbom: true
+      - name: Escribir referencia inmutable para instalación y GitOps
+        if: steps.publish.outcome == 'success'
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          printf 'APP_IMAGE=ghcr.io/aculledor/cebo-de-pemento:sha-%s@%s\n' "$GITHUB_SHA" "$DIGEST" > image.env
+          cat image.env >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: steps.publish.outcome == 'success'
+        with: { name: cebo-image-digest, path: image.env, retention-days: 90 }

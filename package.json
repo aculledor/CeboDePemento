@@ -20,6 +20,7 @@
     "test:browser": "npm run build && playwright test",
     "db:migrate": "npm run migrate -w @cebo/api",
     "db:backup": "npm run backup -w @cebo/api",
+    "catalog:import": "npm run catalog:import -w @cebo/api --",
     "db:restore": "node --import tsx scripts/restore.ts",
     "admin:create": "npm run admin -w @cebo/api --",
     "invite:create": "npm run invite -w @cebo/api --",

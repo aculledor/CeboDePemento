@@ -1,4 +1,21 @@
-{$DOMAIN} {
+{
+  admin off
+  auto_https disable_redirects
+  default_sni {$LAN_HOST}
+  servers {
+    protocols h1 h2
+  }
+}
+https://{$LAN_HOST}:8443 {
+  tls internal
   encode zstd gzip
   reverse_proxy app:3001
+}
+# Container-only health endpoint; this port is never published on the host.
+http://:8081 {
+  handle /healthz {
+    rewrite * /api/health
+    reverse_proxy app:3001
+  }
+  respond 404
 }

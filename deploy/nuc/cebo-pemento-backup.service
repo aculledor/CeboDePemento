@@ -1,0 +1,13 @@
+[Unit]
+Description=Exportar snapshot consistente de pesca fuera del volumen Docker
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/sbin/cebo-pemento-deploy --backup
+TimeoutStartSec=600
+Nice=15
+UMask=0077

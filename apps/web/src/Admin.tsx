@@ -16,6 +16,7 @@ import { api, ApiFailure } from "./api";
 import { useOnline } from "./connectivity";
 import { useConfirmedWrite } from "./useConfirmedWrite";
 import { PhotoManager } from "./Photos";
+import { ImportReview, SizeReferences } from "./Imports";
 
 import { ErrorMessage } from "./ErrorMessage";
 export function Admin() {
@@ -202,6 +203,7 @@ export function Admin() {
           </button>
         </div>
       </section>
+      <ImportReview />
     </>
   );
 }
@@ -527,6 +529,7 @@ function Editor({ id, initial }: { id: string; initial: TaxonInput }) {
         {!isNew && (
           <>
             <PhotoManager id={id} />
+            <SizeReferences taxonId={id!} admin />
             <h2>{t("history")}</h2>
             <ul>
               {history.data?.map((row) => (

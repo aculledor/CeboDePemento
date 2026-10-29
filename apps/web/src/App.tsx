@@ -35,6 +35,7 @@ const MapPage = lazy(() =>
   import("./Community").then((m) => ({ default: m.MapPage })),
 );
 import { Gallery } from "./Photos";
+import { SizeReferences } from "./Imports";
 import { ErrorMessage } from "./ErrorMessage";
 function Home({ user, health }: { user: User; health?: HealthResponse }) {
   const { t } = useTranslation();
@@ -307,6 +308,7 @@ function Detail() {
           </div>
         )}
         <Gallery id={taxon.id} />
+        <SizeReferences taxonId={taxon.id} />
         <h2>{t("names")}</h2>
         <dl>
           <dt>{t("glName")}</dt>

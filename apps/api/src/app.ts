@@ -14,6 +14,7 @@ import { registerPhotos, type FetchRemote } from "./photos.js";
 import { registerFishing } from "./fishing.js";
 import { registerLeagues } from "./leagues.js";
 import { registerCommunity } from "./community.js";
+import { registerImports } from "./pescaderias/routes.js";
 export async function createApp(
   store: Store,
   logger = false,
@@ -98,6 +99,7 @@ export async function createApp(
   registerFishing(app, store);
   registerLeagues(app, store);
   registerCommunity(app, store);
+  registerImports(app, store);
   const web = resolve(root, "apps/web/dist");
   if (existsSync(web)) {
     await app.register(staticFiles, { root: web });

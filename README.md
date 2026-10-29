@@ -15,10 +15,10 @@ winget install Git.Git
 
 Abre una nueva terminal y comprueba `node --version` (24.x) y `git --version`. Si el instalador LTS ofrece otra versión mayor, descarga Node 24 desde https://nodejs.org/en/download.
 
-**Código entregado en la rama `codex/web-pesca-v0.1.0`**. Puedes descargar su ZIP desde GitHub y entrar en la carpeta descomprimida, o clonar esa rama:
+**Ampliación y preparación del NUC en la rama `feat/catalogo-pescaderias-xunta`** (pendiente de revisión e integración en main). Puedes descargar su ZIP desde GitHub y entrar en la carpeta descomprimida, o clonar esa rama:
 
 ```powershell
-git clone --branch codex/web-pesca-v0.1.0 https://github.com/aculledor/CeboDePemento.git
+git clone --branch feat/catalogo-pescaderias-xunta https://github.com/aculledor/CeboDePemento.git
 ```
 
 ```powershell
@@ -118,45 +118,23 @@ Para restaurar:
 
 La restauración **no sobrescribe** destinos existentes. Si solo restauras un fichero SQLite, el primer argumento puede ser su ruta; el snapshot completo es preferible. No copies únicamente el `.sqlite` activo mientras está en WAL: utiliza el comando de backup.
 
-## Linux doméstico: Docker y HTTPS
+## Intel NUC: Docker, HTTPS y GitOps
 
-Instala Docker Engine y Compose v2 siguiendo la documentación de tu distribución. Copia este proyecto al servidor. En `.env` configura un **dominio real**, cuyo DNS apunte a tu conexión:
+La instalación preparada para Ubuntu Server 24.04/AMD64 está en **[docs/NUC.md](docs/NUC.md)**, con comandos de instalación, persistencia, CA para móviles, migración, GHCR, actualizaciones opt-in, backups y rollback. Caddy expone únicamente un puerto LAN configurable (8444 propuesto), preservando AdGuard, Tailscale y multimedia. La API sirve React y SQLite permanece en un volumen externo. La guía sustituye las instrucciones anteriores de publicar 80/443.
 
-```dotenv
-DOMAIN=pesca.tu-dominio.es
-```
+La imagen se publica por SHA/digest desde main después de pasar las pruebas; las instalaciones consumen esa imagen con `--no-build`. El actualizador requiere instalación y activación manuales. Ni el PR ni su fusión despliegan por sí solos en el NUC. No se ha accedido ni desplegado allí.
 
-```bash
-docker compose up -d --build
-docker compose exec app node apps/api/dist/cli.js admin admin
-```
-
-Caddy expone 80/443 y gestiona HTTPS. La API no publica su puerto interno; SQLite, fotos y snapshots persisten en `fishing_data`. La aplicación comprueba backups al arrancar y cada hora; crea uno cuando han pasado 24 horas desde la última copia verificada. Los reinicios no reinician el cómputo de esa última copia. Las copias no se eliminan automáticamente.
-
-Si migras datos de Windows, **no crees otro primer administrador**. Genera allí un snapshot, transfiérelo y restaura dentro del volumen en destinos nuevos:
+Para probar un build Docker local aislado, después de revisar las variables y crear un volumen de prueba:
 
 ```bash
-docker compose cp ./snapshot app:/app/data/transferencia
-docker compose exec --user root app chown -R node:node /app/data/transferencia
-docker compose exec app node apps/api/dist/cli.js restore data/transferencia data/restored.sqlite data/restored-photos
+APP_IMAGE=cebo-pemento:local LAN_IP=127.0.0.1 docker compose -f compose.yaml -f compose.build.yaml build app
 ```
 
-Cambia `.env` a las rutas restauradas y aplica:
+## Ampliación del catálogo: pescadeRías
 
-```dotenv
-DATABASE_PATH=data/restored.sqlite
-PHOTO_DIRECTORY=data/restored-photos
-```
+**[docs/CATALOGO_IMPORT.md](docs/CATALOGO_IMPORT.md)** documenta la CLI `npm run catalog:import -- help`, permisos de acceso/reutilización, simulación, reanudación, tallas multimedida e integración administrativa bilingüe. Las importaciones preservan IDs, alias, ediciones manuales, capturas y reglas existentes; las referencias de la fuente quedan pendientes de validación recreativa.
 
-```bash
-docker compose up -d --force-recreate app caddy
-docker compose exec app node apps/api/dist/cli.js backup
-docker compose logs --tail=50 app caddy
-```
-
-Para copiar backups fuera del contenedor: `docker compose cp app:/app/data/backups ./backups-servidor`. No uses `docker compose down -v`: eliminaría los volúmenes. Si la red Docker personalizada no utiliza 172.16.0.0/12, ajusta `TRUST_PROXY` al rango de tu proxy. Solo debe confiar en Caddy, no en cualquier origen.
-
-Si tu operador usa CG-NAT, el reenvío de puertos no basta: utiliza acceso VPN privado (por ejemplo Tailscale) o un túnel HTTPS configurado con tu dominio y origen exacto. Ese acceso, DNS, certificados reales y pruebas desde fuera de tu LAN requieren tu infraestructura; no se han desplegado en este entorno.
+El entorno todavía bloquea el dominio de la Xunta con 403. No se ha realizado una importación real ni se ha validado el parser contra HTML real; los fixtures de contrato se identifican como sintéticos. No se han poblado funciones con datos ficticios.
 
 ## Estructura y estado
 

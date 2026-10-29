@@ -104,5 +104,18 @@ test("Mobile login, real catalog, session/capture, league, statistics, map and i
     .getByRole("button", { name: "Crear invitación · 72 horas", exact: true })
     .click();
   await expect(page.locator("code.token")).toHaveText(/[A-Za-z0-9_-]{43}/);
+  await expect(
+    page.getByRole("heading", {
+      name: "Revisión de importaciones · pescadeRías",
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("No hay importaciones con estos filtros.").last(),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
   expect(errors).toEqual([]);
 });

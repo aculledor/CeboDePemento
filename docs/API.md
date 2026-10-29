@@ -1,3 +1,7 @@
+# Ampliación de catálogo (29/10/2026)
+
+Las rutas de importación, revisión de identidad/conflictos, permisos de imágenes y referencias multimedida se documentan en [CATALOGO_IMPORT.md](CATALOGO_IMPORT.md#trazabilidad-y-api). Comparten autenticación, CSRF, revisión e idempotencia con el resto de la API. Las nuevas referencias no alteran automáticamente las capturas ni reglas existentes.
+
 # API de la aplicación
 
 Base `/api`, JSON, mismo origen. Todas las lecturas de datos requieren autenticación salvo `GET /health` y `GET /auth/csrf`. Respuestas `Cache-Control: no-store`. En desarrollo Vite actúa como proxy; en producción React y API se sirven juntos tras Caddy.

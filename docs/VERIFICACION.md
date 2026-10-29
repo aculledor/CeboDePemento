@@ -1,3 +1,19 @@
+# Ampliación verificada el 29/10/2026
+
+- `npm run typecheck`, `npm run build`: correctos con Node 24.19.0.
+- `npm test`: **31 pruebas** de API, seguridad, persistencia, catálogo/importación y puntuaciones; bases temporales reales. Incluye preservación de capturas/reglas/ranking, prioridad manual/rechazos, idempotencia, transacción completa y medidas no equivalentes.
+- Playwright Chromium, 390 × 844: **1 recorrido móvil completo**, incluido panel de importaciones conectado a API y ausencia de desbordamiento horizontal. Se prueba pérdida de respuesta después de confirmar escritura en el servidor.
+- Actualizador NUC: **5 pruebas Python offline** de referencias OCI, configuración, cierre de acceso antes de rollback y protección de escrituras tras aceptar la nueva versión.
+- `npm audit`: **0 vulnerabilidades** después de actualizar dependencias afectadas; lockfile conservado.
+- Docker AMD64 construido y arrancado sin escritura fuera del volumen, con usuario sin privilegios, límites de recursos, migración 0006, salud, recreación conservando usuario, backup/exportación y restauración a nuevos destinos.
+- Compose real app+Caddy comprobado en un proyecto/volúmenes de prueba exclusivos. HTTPS con CA verificada (sin desactivar TLS), login con cookie Secure y consulta real del catálogo. Exportación de snapshot desde un auxiliar detenido con volumen de solo lectura comprobada.
+- Workflow validado con actionlint 1.7.7 (binario con checksum verificado), Compose config y sintaxis Bash/Python correctas. La ejecución de Actions/GHCR requiere el PR/main; una verificación local no acredita publicación remota.
+- Original `catalogo.sqlite` conserva SHA-256 `ca421f5e08634e5293c0234c915ecb8aac4dde7141111059215d03762498f796`. Seed reproducido en memoria: 932 taxones, integridad OK y cero errores FK. Ningún dato de prueba importado al catálogo de uso.
+- Acceso a `deondesenon.xunta.gal` bloqueado por el proxy (403 CONNECT, también en robots.txt). La CLI `inspect` se intentó realmente y falló sin modificar SQLite. **Pendientes: HTML real, robots/condiciones, permisos y primera importación real.** Los fixtures de parser son sintéticos, explícitamente documentados. No se descargaron ni publicaron ilustraciones de la Xunta.
+- `servidor-casa` se consultó en lectura; no se modificó. No se ha accedido ni desplegado en el NUC, fusionado el PR, activado timers ni alterado servicios existentes.
+
+Procedimientos actuales: [importación](CATALOGO_IMPORT.md) y [NUC](NUC.md). Las secciones históricas siguientes describen la verificación anterior de v0.1.0; su esquema de acceso público/80/443 queda sustituido por la configuración LAN actual.
+
 # Verificación de la entrega
 
 Fecha: 12 de octubre de 2026. Entorno de ejecución Linux, Node 24.19.0, npm 11.9.0; Docker con Node 24 LTS. No se ejecutó sobre un equipo físico Windows/iPhone/Android.

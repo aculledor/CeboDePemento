@@ -1,3 +1,11 @@
+# Ampliación del 29/10/2026
+
+Importador incremental de pescadeRías, migración 0006 y revisión administrativa implementados. Sin importación real por bloqueo 403 del proxy y sin permisos de reutilización verificables. Ver [CATALOGO_IMPORT.md](CATALOGO_IMPORT.md).
+
+Docker/Compose, CI/GHCR AMD64 y actualizador opt-in preparados para el NUC real documentado en servidor-casa. Sin cambios en ese repositorio ni despliegue remoto. La instalación actual es privada por LAN HTTPS en puerto configurable; seguir [NUC.md](NUC.md), que sustituye el esquema anterior con dominio público/80/443.
+
+El estado histórico de las funciones de aplicación se conserva debajo.
+
 # Estado de la versión 0.1.0
 
 | Fase | Implementación |

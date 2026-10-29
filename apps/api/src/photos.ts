@@ -60,6 +60,7 @@ interface Candidate {
   provider: string;
 }
 const allowed = new Set([
+  "deondesenon.xunta.gal",
   "commons.wikimedia.org",
   "upload.wikimedia.org",
   "api.inaturalist.org",

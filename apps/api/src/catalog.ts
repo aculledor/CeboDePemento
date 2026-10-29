@@ -8,6 +8,7 @@ import {
   type TaxonInput,
 } from "@cebo/shared";
 import { taxa, names, profiles } from "./schema.js";
+import { markManualFields } from "./pescaderias/importer.js";
 import type { Store } from "./database.js";
 import {
   requireUser,
@@ -212,6 +213,7 @@ export function registerCatalog(app: FastifyInstance, store: Store) {
       )
       .run();
     const result = get(id);
+    markManualFields(store.sqlite, id, actorId, previous, result);
     audit(
       store,
       actorId,

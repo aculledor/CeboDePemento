@@ -1,6 +1,7 @@
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 import { phaseGl, phaseEs } from "./phase-translations";
+import { importGl, importEs } from "./import-translations";
 // Editorial translations are explicit; only the interface language is persisted.
 const gl = {
   catalog: "Especies",
@@ -84,6 +85,8 @@ try {
 } catch {}
 Object.assign(gl, phaseGl);
 Object.assign(es, phaseEs);
+Object.assign(gl, importGl);
+Object.assign(es, importEs);
 Object.assign(gl, {
   sessions_profile: "Deste perfil",
   recordOrder: "Ordenar os récords por",

@@ -10,3 +10,5 @@ work/
 coverage/
 
 output/
+__pycache__/
+*.pyc
