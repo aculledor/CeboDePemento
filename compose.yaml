@@ -1,0 +1,99 @@
+name: cebo-pemento
+services:
+  app:
+    image: ${APP_IMAGE:?Configura APP_IMAGE con una referencia GHCR por digest}
+    platform: linux/amd64
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3001
+      TZ: Europe/Madrid
+      NODE_OPTIONS: --max-old-space-size=384
+      APP_ORIGINS: ${PUBLIC_ORIGINS:-https://${LAN_IP:-127.0.0.1}:${HTTPS_PORT:-8444}}
+      DATABASE_PATH: ${DATABASE_PATH:-data/catalogo.sqlite}
+      PHOTO_DIRECTORY: ${PHOTO_DIRECTORY:-data/photos}
+      BACKUP_INTERVAL_HOURS: 24
+      TRUST_PROXY: loopback,linklocal,uniquelocal
+    volumes:
+      - fishing_data:/app/data
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,uid=1000,gid=1000,size=64m
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 128
+    stop_grace_period: 45s
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: 5m, max-file: "3" }
+  caddy:
+    image: caddy:2.11.2-alpine@sha256:834468128c7696cec0ceea6172f7d692daf645ae51983ca76e39da54a97c570d
+    platform: linux/amd64
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    # Official caddy binary carries this file capability; keep it in the bounding set.
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      LAN_HOST: ${LAN_IP:-127.0.0.1}
+      # Reverse-proxy traffic stays on the dedicated Compose network.
+      NO_PROXY: app,localhost,127.0.0.1
+      no_proxy: app,localhost,127.0.0.1
+    ports:
+      - "${LAN_IP:-127.0.0.1}:${HTTPS_PORT:-8444}:8443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=16m
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 64
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-Y",
+          "off",
+          "-q",
+          "--spider",
+          "http://127.0.0.1:8081/healthz",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: 5m, max-file: "2" }
+volumes:
+  fishing_data:
+    external: true
+    name: ${DATA_VOLUME:-cebo_pemento_data}
+  caddy_data:
+    name: cebo_pemento_caddy_data
+  caddy_config:
+    name: cebo_pemento_caddy_config

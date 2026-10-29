@@ -1,0 +1,7 @@
+# Local build only. Production uses the published digest and --no-build.
+services:
+  app:
+    build:
+      context: .
+      args:
+        REVISION: ${REVISION:-development}

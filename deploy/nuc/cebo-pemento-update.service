@@ -1,0 +1,17 @@
+[Unit]
+Description=Actualizar solo Cebo de Pemento desde main y GHCR
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+ConditionPathExists=/etc/cebo-pemento/auto.enabled
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/sbin/cebo-pemento-deploy --auto
+TimeoutStartSec=1200
+Nice=15
+UMask=0077
+CPUQuota=50%
+MemoryMax=256M

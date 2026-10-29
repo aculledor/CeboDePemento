@@ -1,0 +1,11 @@
+[Unit]
+Description=Consultar nuevas versiones de pesca cada diez minutos (activación manual)
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=10min
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target
