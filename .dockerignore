@@ -1,4 +1,7 @@
 .git
+deploy/dev/tls/
+dev.env
+**/*.key
 .env
 .env.*
 node_modules

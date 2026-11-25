@@ -18,6 +18,8 @@ def issue(ca_dir, tls_dir):
         if any(part.is_symlink() for part in [provided, *provided.parents]):
             raise ValueError("Certificate paths must not contain symlinks")
     ca, tls = Path(ca_dir).resolve(), Path(tls_dir).resolve()
+    if ca.is_relative_to(Path(__file__).resolve().parents[1]):
+        raise ValueError("CA private keys must live outside the repository")
     if ca == tls or ca.is_relative_to(tls) or tls.is_relative_to(ca):
         raise ValueError("CA and deployable TLS directories must be separate")
     for directory in (ca, tls):

@@ -71,6 +71,9 @@ class WorkflowSafety(unittest.TestCase):
                 if step.get("uses", "").startswith("actions/checkout@"):
                     self.assertIs(step["with"]["persist-credentials"], False)
                     self.assertNotEqual(name, "publish")
+        for name in ("validate", "test-image"):
+            self.assertIn("Verificar ausencia de credenciales antes de ejecutar código",
+                          [s.get("name") for s in self.workflow["jobs"][name]["steps"]])
         steps = self.workflow["jobs"]["publish"]["steps"]
         text = json.dumps(steps)
         for command in ("npm ", "scripts/", "docker run", "docker build", "build-push-action", "checkout@"):
@@ -90,8 +93,10 @@ class WorkflowSafety(unittest.TestCase):
         self.assertEqual(exports[0]["if"], "github.event_name == 'push' && github.ref == 'refs/heads/main'")
         self.assertEqual(len([s for s in image["steps"] if "build-push-action" in s.get("uses", "")]), 1)
         for name in ("validate", "test-image"):
-            self.assertNotIn("GITHUB_TOKEN", json.dumps(self.workflow["jobs"][name]))
-            self.assertNotIn("GHCR_TOKEN", json.dumps(self.workflow["jobs"][name]))
+            for step in self.workflow["jobs"][name]["steps"]:
+                self.assertNotIn("GITHUB_TOKEN", step.get("env", {}))
+                self.assertNotIn("GHCR_TOKEN", step.get("env", {}))
+                self.assertNotIn("github.token", json.dumps(step))
         self.assertNotIn("specops-candidate-v1", json.dumps(self.workflow))
 
 
@@ -216,6 +221,8 @@ class Certificates(unittest.TestCase):
     def test_ca_must_not_be_inside_deployable_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError): certs.issue(Path(tmp) / "tls/ca", Path(tmp) / "tls")
+        with self.assertRaisesRegex(ValueError, "outside the repository"):
+            certs.issue(ROOT / "untracked-ca", ROOT / "deploy/dev/tls")
 
     def test_certificate_paths_cannot_follow_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:

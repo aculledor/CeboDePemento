@@ -16,6 +16,14 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { persist-credentials: false }
+      - name: Verificar ausencia de credenciales antes de ejecutar código
+        run: |
+          set -euo pipefail
+          if git config --local --get-regexp 'http\..*\.extraheader|credential\..*' >/dev/null; then
+            echo 'Unexpected persisted checkout credential' >&2
+            exit 1
+          fi
+          [[ -z "${GITHUB_TOKEN:-}" && -z "${GHCR_TOKEN:-}" ]]
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: "24.19.0", cache: npm }
       - run: npm ci --no-audit --no-fund
@@ -49,6 +57,14 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { persist-credentials: false }
+      - name: Verificar ausencia de credenciales antes de ejecutar código
+        run: |
+          set -euo pipefail
+          if git config --local --get-regexp 'http\..*\.extraheader|credential\..*' >/dev/null; then
+            echo 'Unexpected persisted checkout credential' >&2
+            exit 1
+          fi
+          [[ -z "${GITHUB_TOKEN:-}" && -z "${GHCR_TOKEN:-}" ]]
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - run: sudo apt-get update -qq && sudo apt-get install -y skopeo python3-yaml
       - name: Construir una vez; conservar OCI, procedencia y SBOM

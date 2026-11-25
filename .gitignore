@@ -16,3 +16,4 @@ __pycache__/
 # Generated DEV TLS leaves; CA private keys must live outside the install tree.
 deploy/dev/tls/
 dev.env
+*.key
