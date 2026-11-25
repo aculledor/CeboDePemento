@@ -4,6 +4,7 @@ set -Eeuo pipefail
 [[ "${CI:-}" == true && "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted ]]
 : "${CEBO_DEV_IMAGE:?Use the already built CI image}"
 export CEBO_DEV_IMAGE
+export CEBO_DEV_HOST=127.0.0.1 CEBO_DEV_BIND=127.0.0.1
 project=cebo-pemento-dev
 compose=(docker compose --env-file /dev/null -p "$project" -f deploy/dev/compose.yaml)
 tmp="$(mktemp -d)"
@@ -38,9 +39,18 @@ assert not app.get("ports")
 assert app["environment"]["APP_ORIGINS"] == "https://127.0.0.1:18444"
 assert app["environment"]["DATABASE_PATH"] == "data/catalogo.sqlite"
 assert app["environment"]["PHOTO_DIRECTORY"] == "data/photos"
+assert gateway["environment"]["DEV_HOST"] == "127.0.0.1"
 assert len(gateway["ports"]) == 1
 p = gateway["ports"][0]
 assert (p["host_ip"], str(p["published"]), p["target"]) == ("127.0.0.1", "18444", 8443)
+PY
+CEBO_DEV_HOST=cebo-dev.home.arpa CEBO_DEV_BIND=192.0.2.10 "${compose[@]}" config --format json > "$tmp/lan.json"
+python3 - "$tmp/lan.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+assert c["services"]["app"]["environment"]["APP_ORIGINS"] == "https://cebo-dev.home.arpa:18444"
+assert c["services"]["caddy"]["environment"]["DEV_HOST"] == "cebo-dev.home.arpa"
+assert c["services"]["caddy"]["ports"][0]["host_ip"] == "192.0.2.10"
 PY
 "${compose[@]}" pull caddy
 "${compose[@]}" up -d --no-build --pull never --wait --wait-timeout 120
