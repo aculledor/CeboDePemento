@@ -21,13 +21,16 @@ c = json.loads(Path(sys.argv[1]).read_text())
 assert c["name"] == "cebo-pemento-dev"
 assert set(c["services"]) == {"app", "caddy"}
 assert c["networks"]["dev"]["internal"] is True
+assert set(c["networks"]) == {"dev", "ingress"}
+assert not c["networks"]["ingress"].get("internal", False)
+assert c["networks"]["ingress"]["driver"] == "bridge"
 for v in c["volumes"].values():
     assert not v.get("external") and v["name"].startswith("cebo-pemento-dev_")
-for s in c["services"].values():
+for name, s in c["services"].items():
     assert s["restart"] == "no"
     assert not s.get("privileged") and not s.get("container_name")
     assert s.get("network_mode") is None
-    assert set(s["networks"]) == {"dev"}
+    assert set(s["networks"]) == ({"dev"} if name == "app" else {"dev", "ingress"})
     for v in s.get("volumes", []):
         if v["type"] == "bind":
             assert v["target"] == "/etc/caddy/Caddyfile" and v["read_only"]
