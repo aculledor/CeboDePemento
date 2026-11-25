@@ -1,29 +1,30 @@
-# DEV aislado (PC local, WSL2/Docker Desktop)
-Propuesta para revisar. No ejecutar en servidor de producción ni contra un contexto Docker remoto. No combinar este archivo con compose.yaml o compose.build.yaml de producción. Un único proyecto DEV por equipo, puerto loopback 18444; no acceder desde LAN/WAN. La red interna impide usar proveedores externos: usar fixtures para integraciones y catálogo, no credenciales reales. El catálogo base viene de la imagen; crear solo usuarios ficticios. Los datos, CA y fotos se conservan en volúmenes DEV independientes.
+# DEV persistente en NUC (propuesta, instalación autorizada aparte)
+DEV y PROD deben estar disponibles con el PC apagado. El NUC aloja ambos, pero este manifiesto autónomo nunca se combina con el Compose productivo. Instalación DEV propuesta: /opt/servicios-dev/cebo-pemento; no usar /opt/servicios/cebo-pemento ni su .env. Redes, volúmenes SQLite/fotos, CA y usuarios exclusivamente DEV. No montar HDD multimedia ni Docker socket. No dar acceso Docker a usuarios de prueba. CI hosted construye imágenes y ejecuta pruebas pesadas; no compilar en el NUC por defecto.
 
-Desde el repositorio raíz en WSL2, comprobar docker context show y docker context inspect (destino local), revisar DOCKER_HOST/DOCKER_CONTEXT y no continuar si apuntan a otro host. No copiar .env, image.env ni bases reales. Usar siempre los argumentos explícitos de proyecto y manifiesto:
+## Acceso
+Puerto LAN propuesto 18444. El host de navegador DEV debe ser distinto del productivo: cebo-dev.home.arpa (propuesta). Las cookies no distinguen puertos; no iniciar sesión en DEV mediante la IP productiva. Resolver ese hostname hacia la IP LAN del NUC mediante archivo hosts del dispositivo de pruebas o DNS privado aprobado posteriormente; no cambiar AdGuard/router sin autorización. CA exclusiva DEV, confiar únicamente en el perfil/dispositivo de prueba. No exponer WAN. Acceso remoto privado sujeto a revisión de Tailscale; no cambiar sus reglas desde este PR.
 
+## Instalación (solo después de autorización y revisión)
+Comprobar memoria/CPU, espacio, puertos y redes existentes; presupuesto inicial máximo Cebo 640 MiB y 0.75 CPU más overhead. Usar un digest de candidato verificado obtenido desde CI. No ejecutar comandos con contexto Docker remoto ni reutilizar configuraciones o imágenes privadas de producción. Copiar compose.yaml y Caddyfile revisados al directorio DEV. Crear allí un archivo dev.env privado, con CEBO_DEV_BIND igual a la IP LAN del NUC, CEBO_DEV_HOST=cebo-dev.home.arpa y CEBO_DEV_IMAGE igual a la referencia OCI completa SHA@sha256 autorizada. No versionar dev.env. Defaults loopback únicamente para CI/local. Verificar que el hostname no sea el de producción y que la imagen y puerto sean los previstos antes de arrancar.
 ```bash
-docker build -t cebo-pemento:dev .
-docker compose --env-file /dev/null -p cebo-pemento-dev -f deploy/dev/compose.yaml config --quiet
-docker compose --env-file /dev/null -p cebo-pemento-dev -f deploy/dev/compose.yaml up -d --no-build --wait --wait-timeout 120
-docker compose --env-file /dev/null -p cebo-pemento-dev -f deploy/dev/compose.yaml ps
+cd /opt/servicios-dev/cebo-pemento
+docker compose --env-file dev.env -p cebo-pemento-dev -f compose.yaml config --quiet
+docker compose --env-file dev.env -p cebo-pemento-dev -f compose.yaml pull
+docker compose --env-file dev.env -p cebo-pemento-dev -f compose.yaml up -d --no-build --pull never --wait --wait-timeout 120
+docker compose --env-file dev.env -p cebo-pemento-dev -f compose.yaml ps
 ```
-
-Para QA del candidato OCI, exportar CEBO_DEV_IMAGE con la referencia completa por SHA@sha256 de un artefacto aprobado para QA, hacer pull explícito de esa referencia y ejecutar los mismos comandos con --pull never. No reconstruir ese candidato. Para edición rápida, seguir usando npm run dev con datos locales.
-
-Crear un administrador **ficticio** (contraseña única DEV introducida de forma interactiva según CLI):
+Crear solo administrador ficticio con contraseña exclusiva DEV mediante la CLI interactiva:
 ```bash
-docker compose --env-file /dev/null -p cebo-pemento-dev -f deploy/dev/compose.yaml exec app node apps/api/dist/cli.js admin devadmin
+docker compose --env-file dev.env -p cebo-pemento-dev -f compose.yaml exec app node apps/api/dist/cli.js admin devadmin
 mkdir -p work/dev-tls
-docker compose --env-file /dev/null -p cebo-pemento-dev -f deploy/dev/compose.yaml cp caddy:/data/caddy/pki/authorities/local/root.crt work/dev-tls/root.crt
-curl --noproxy '*' --cacert work/dev-tls/root.crt https://127.0.0.1:18444/api/health
+docker compose --env-file dev.env -p cebo-pemento-dev -f compose.yaml cp caddy:/data/caddy/pki/authorities/local/root.crt work/dev-tls/root.crt
+curl --noproxy '*' --cacert work/dev-tls/root.crt https://cebo-dev.home.arpa:18444/api/health
 ```
-Abrir https://127.0.0.1:18444 tras confiar exclusivamente en la CA DEV en el almacén/perfil de navegador de pruebas; no importar CA PROD ni desactivar la verificación TLS. Si el navegador está en Windows, comprobar el forwarding loopback de Docker Desktop. Retirar la confianza cuando ya no se utilice.
+La última prueba requiere resolución del nombre en el NUC; alternativamente usar curl --resolve con IP LAN verificada. Comprobar desde otro dispositivo LAN tras confiar en CA DEV. No usar -k. La red interna bloquea proveedores externos; usar fixtures. El catálogo base procede de la imagen, no de la base real.
 
-Para logs y parada no destructiva:
+## Operación
 ```bash
-docker compose --env-file /dev/null -p cebo-pemento-dev -f deploy/dev/compose.yaml logs --tail 50
-docker compose --env-file /dev/null -p cebo-pemento-dev -f deploy/dev/compose.yaml stop
+docker compose --env-file dev.env -p cebo-pemento-dev -f compose.yaml logs --tail 50
+docker compose --env-file dev.env -p cebo-pemento-dev -f compose.yaml stop
 ```
-No subir logs, credenciales, CA privada ni datos. Para reset, un proyecto/volumen de ensayo nuevo y revisión explícita de recursos; no usar down -v ni limpiezas generales. Esta entrega no implementa OIDC ni promoción PROD; mantiene los manifiestos productivos y sus procedimientos intactos. La prueba CI usa datos efímeros y verifica la configuración efectiva, salud y TLS con la CA real de DEV.
+No subir logs, secretos, CA privada ni datos. Para reset usar un proyecto/volumen nuevo revisado; no down -v ni limpiezas generales. Arranque al reiniciar: unidad systemd DEV independiente pendiente de revisión e instalación autorizada; este manifiesto conserva restart:no hasta validar convivencia. No tocar timers ni unidades PROD. No implica promoción, OIDC ni instalación real. CI prueba loopback con CA real; la accesibilidad LAN, recursos simultáneos y arranque tras reinicio se verifican posteriormente en NUC.
