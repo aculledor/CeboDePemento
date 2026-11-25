@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 PROJECT = Path("/opt/servicios/cebo-pemento")
@@ -29,6 +30,21 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 class DeployError(Exception):
     pass
+
+
+def acquire_lock(lock, backup_mode=False, timeout=300, clock=time.monotonic, pause=time.sleep):
+    """A scheduled backup must never report success without making its snapshot."""
+    deadline = clock() + timeout
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError as error:
+            if not backup_mode:
+                return False
+            if clock() >= deadline:
+                raise DeployError("Backup bloqueado: timeout esperando el lock compartido; no se ha creado copia") from error
+            pause(min(1, max(0, deadline - clock())))
 
 
 def run(*args, timeout=180, env=None):
@@ -216,9 +232,7 @@ def main():
             raise DeployError("Actualización automática no autorizada localmente")
     # Share the existing infrastructure lock; never invoke its deploy script.
     with open("/run/lock/servidor-casa-deploy.lock", "a+") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+        if not acquire_lock(lock, backup_mode=args.backup):
             print("Otro GitOps está ocupado; se reintentará en el siguiente ciclo")
             return
         old = image_env["APP_IMAGE"]

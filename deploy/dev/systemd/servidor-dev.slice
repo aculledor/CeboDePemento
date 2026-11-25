@@ -1,0 +1,11 @@
+[Unit]
+Description=Shared DEV budget (reference; install only after local authorization)
+
+[Slice]
+MemoryAccounting=true
+CPUAccounting=true
+MemoryHigh=1024M
+MemoryMax=1152M
+MemorySwapMax=0
+CPUQuota=175%
+TasksMax=512

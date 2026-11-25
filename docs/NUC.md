@@ -27,13 +27,13 @@ Si existe una instalación de pesca, **identifica su volumen, base, fotos y back
 
 ## 2. Código revisado e imagen publicada
 
-En GitHub, proteger `main` mediante revisión y exigir los checks `validate` e `image`. El workflow `.github/workflows/ci-ghcr.yml` prueba TypeScript, API, importador, navegador móvil, estado del actualizador, Compose e imagen de producción. En PR construye/prueba sin publicar. Solo un push/ejecución manual sobre `main` publica:
+En GitHub, proteger `main` mediante revisión y exigir los checks `validate` y `test-image`. El workflow `.github/workflows/ci-ghcr.yml` prueba TypeScript, API, importador, navegador móvil, estado del actualizador, Compose e imagen de producción. En PR construye/prueba sin publicar. Solo un push sobre `main` publica, en un job separado sin checkout ni ejecución del código del repositorio. La ejecución manual solo prueba. Ver [seguridad DEV/CI](../deploy/dev/README.md). Publica el OCI ya probado sin rebuild:
 
 ```text
 ghcr.io/aculledor/cebo-de-pemento:sha-COMMIT@sha256:DIGEST
 ```
 
-Node y Caddy están fijados por versión y digest real; las acciones por SHA. Se genera SBOM/procedencia y el artefacto **cebo-image-digest/image.env**. No hay publicación desde PR, runner doméstico ni credenciales SSH del NUC en Actions. La primera publicación requiere que Actions esté habilitado y `GITHUB_TOKEN` tenga permiso de paquetes; si la cuenta impone aprobaciones/políticas, completarlas en GitHub. La ejecución remota del workflow no se considera verificada solo porque pasen pruebas locales.
+Node y Caddy están fijados por versión y digest real; las acciones por SHA. Se conserva SBOM/procedencia BuildKit en el OCI, y se exporta el artefacto **cebo-image-digest/image.env**. No hay publicación desde PR, runner doméstico ni credenciales SSH del NUC en Actions. La primera publicación requiere que Actions esté habilitado y `GITHUB_TOKEN` tenga permiso de paquetes; si la cuenta impone aprobaciones/políticas, completarlas en GitHub. La ejecución remota del workflow no se considera verificada solo porque pasen pruebas locales.
 
 Clonar solo si no existe el directorio; como usuario `servidor`:
 
@@ -201,7 +201,7 @@ Una actualización/reversión manual debe utilizar un `image.env` archivado real
 
 ## 8. Backup externo y recuperación de desastre
 
-La aplicación genera snapshots diarios en `data/backups`; el timer opcional los exporta a `/var/backups/cebo-pemento-deploy`. No hay poda automática: vigilar espacio y definir retención después de una recuperación probada. El volumen de Caddy contiene clave privada de CA: respaldarlo privadamente si quieres conservar la confianza de los móviles, o emitir nueva CA y reinstalarla si se pierde. Los backups de pesca incluyen datos personales y hashes de contraseñas: no publicarlos ni adjuntarlos al PR.
+La aplicación genera snapshots diarios en `data/backups`; el timer opcional espera el lock global hasta 300 s (timeout con fallo visible, nunca éxito sin snapshot) y los exporta a `/var/backups/cebo-pemento-deploy`. No hay poda automática: vigilar espacio y definir retención después de una recuperación probada. El volumen de Caddy contiene clave privada de CA: respaldarlo privadamente si quieres conservar la confianza de los móviles, o emitir nueva CA y reinstalarla si se pierde. Los backups de pesca incluyen datos personales y hashes de contraseñas: no publicarlos ni adjuntarlos al PR.
 
 El exportador **no modifica** `/srv/datos/copias-servidor-casa` ni su política. Prepara aparte una segunda copia cifrada fuera del NUC; guardar dos copias en el mismo servidor no cubre fallo/pérdida del equipo. Con el SSD correcto montado, un administrador puede copiar privadamente los snapshots exportados a su destino elegido y comprobar SHA-256. Verifica que el backup global de servidor-casa incluye el volumen de pesca o esta exportación: guardar solo `/opt/servicios` no incluye un volumen Docker nombrado.
 

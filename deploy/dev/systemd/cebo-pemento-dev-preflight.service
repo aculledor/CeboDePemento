@@ -1,0 +1,17 @@
+[Unit]
+Description=Read-only host guard checks before SpecOps Cebo DEV startup
+Requires=docker.service servidor-dev.slice
+After=docker.service network-online.target servidor-dev.slice
+Wants=network-online.target
+Before=servidor-specops@cebo-dev.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/local/libexec/cebo-pemento-dev/preflight.sh
+TimeoutStartSec=60
+
+# No [Install]: pulled in only by the separately reviewed SpecOps drop-in.

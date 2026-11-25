@@ -1,20 +1,21 @@
 {
   admin off
-  auto_https disable_redirects
+  auto_https off
+  persist_config off
   default_sni {$DEV_HOST}
   servers {
     protocols h1 h2
   }
 }
 https://{$DEV_HOST}:8443 {
-  tls internal
+  tls /tls/server.crt /tls/server.key
   encode zstd gzip
-  reverse_proxy app:3001
+  reverse_proxy app-dev:3001
 }
 http://:8081 {
   handle /healthz {
     rewrite * /api/health
-    reverse_proxy app:3001
+    reverse_proxy app-dev:3001
   }
   respond 404
 }
