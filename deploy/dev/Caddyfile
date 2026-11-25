@@ -1,0 +1,20 @@
+{
+  admin off
+  auto_https disable_redirects
+  default_sni 127.0.0.1
+  servers {
+    protocols h1 h2
+  }
+}
+https://127.0.0.1:8443 {
+  tls internal
+  encode zstd gzip
+  reverse_proxy app:3001
+}
+http://:8081 {
+  handle /healthz {
+    rewrite * /api/health
+    reverse_proxy app:3001
+  }
+  respond 404
+}
