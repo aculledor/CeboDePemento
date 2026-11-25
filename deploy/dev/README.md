@@ -20,7 +20,7 @@ mkdir -p work/dev-tls
 docker compose --env-file dev.env -p cebo-pemento-dev -f compose.yaml cp caddy:/data/caddy/pki/authorities/local/root.crt work/dev-tls/root.crt
 curl --noproxy '*' --cacert work/dev-tls/root.crt https://cebo-dev.home.arpa:18444/api/health
 ```
-La última prueba requiere resolución del nombre en el NUC; alternativamente usar curl --resolve con IP LAN verificada. Comprobar desde otro dispositivo LAN tras confiar en CA DEV. No usar -k. La red interna bloquea proveedores externos; usar fixtures. El catálogo base procede de la imagen, no de la base real.
+La última prueba requiere resolución del nombre en el NUC; alternativamente usar curl --resolve con IP LAN verificada. Comprobar desde otro dispositivo LAN tras confiar en CA DEV. No usar -k. La API solo pertenece a la red interna, sin salida a proveedores externos; usar fixtures. Caddy pertenece también a un bridge de entrada independiente para publicar HTTPS; esa red permite salida del gateway, no de la API. No conectar ninguna red PROD. El catálogo base procede de la imagen, no de la base real.
 
 ## Operación
 ```bash
@@ -28,3 +28,5 @@ docker compose --env-file dev.env -p cebo-pemento-dev -f compose.yaml logs --tai
 docker compose --env-file dev.env -p cebo-pemento-dev -f compose.yaml stop
 ```
 No subir logs, secretos, CA privada ni datos. Para reset usar un proyecto/volumen nuevo revisado; no down -v ni limpiezas generales. Arranque al reiniciar: unidad systemd DEV independiente pendiente de revisión e instalación autorizada; este manifiesto conserva restart:no hasta validar convivencia. No tocar timers ni unidades PROD. No implica promoción, OIDC ni instalación real. CI prueba loopback con CA real; la accesibilidad LAN, recursos simultáneos y arranque tras reinicio se verifican posteriormente en NUC.
+
+CI inicial: app y Caddy healthy pero curl al puerto publicado falló (run 45686126222). Se separa bridge de ingreso de red interna; pendiente confirmar corrección en CI.
