@@ -58,6 +58,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - run: bash scripts/docker-smoke.sh cebo-pemento:ci
+      - name: Probar Compose DEV aislado con TLS verificado
+        env: { CEBO_DEV_IMAGE: 'cebo-pemento:ci' }
+        run: bash scripts/dev-compose-smoke.sh
       - name: Login GHCR (solo main, nunca PR)
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
