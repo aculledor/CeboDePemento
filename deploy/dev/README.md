@@ -4,7 +4,7 @@ DEV y PROD deben estar disponibles con el PC apagado. El NUC aloja ambos, pero e
 ## Acceso
 Puerto LAN propuesto 18444. El host de navegador DEV debe ser distinto del productivo: cebo-dev.home.arpa (propuesta). Las cookies no distinguen puertos; no iniciar sesión en DEV mediante la IP productiva. Resolver ese hostname hacia la IP LAN del NUC mediante archivo hosts del dispositivo de pruebas o DNS privado aprobado posteriormente; no cambiar AdGuard/router sin autorización. CA exclusiva DEV, confiar únicamente en el perfil/dispositivo de prueba. No exponer WAN. Acceso remoto privado sujeto a revisión de Tailscale; no cambiar sus reglas desde este PR.
 
-## Instalación (solo después de autorización y revisión)
+## Bootstrap único (solo después de autorización y revisión)
 Comprobar memoria/CPU, espacio, puertos y redes existentes; presupuesto inicial máximo Cebo 640 MiB y 0.75 CPU más overhead. Usar un digest de candidato verificado obtenido desde CI. No ejecutar comandos con contexto Docker remoto ni reutilizar configuraciones o imágenes privadas de producción. Copiar compose.yaml y Caddyfile revisados al directorio DEV. Crear allí un archivo dev.env privado, con CEBO_DEV_BIND igual a la IP LAN del NUC, CEBO_DEV_HOST=cebo-dev.home.arpa y CEBO_DEV_IMAGE igual a la referencia OCI completa SHA@sha256 autorizada. No versionar dev.env. Defaults loopback únicamente para CI/local. Verificar que el hostname no sea el de producción y que la imagen y puerto sean los previstos antes de arrancar.
 ```bash
 cd /opt/servicios-dev/cebo-pemento
@@ -22,7 +22,7 @@ curl --noproxy '*' --cacert work/dev-tls/root.crt https://cebo-dev.home.arpa:184
 ```
 La última prueba requiere resolución del nombre en el NUC; alternativamente usar curl --resolve con IP LAN verificada. Comprobar desde otro dispositivo LAN tras confiar en CA DEV. No usar -k. La API solo pertenece a la red interna, sin salida a proveedores externos; usar fixtures. Caddy pertenece también a un bridge de entrada independiente para publicar HTTPS; esa red permite salida del gateway, no de la API. No conectar ninguna red PROD. El catálogo base procede de la imagen, no de la base real.
 
-## Operación
+## Operación excepcional y diagnóstico
 ```bash
 docker compose --env-file dev.env -p cebo-pemento-dev -f compose.yaml logs --tail 50
 docker compose --env-file dev.env -p cebo-pemento-dev -f compose.yaml stop
@@ -30,3 +30,7 @@ docker compose --env-file dev.env -p cebo-pemento-dev -f compose.yaml stop
 No subir logs, secretos, CA privada ni datos. Para reset usar un proyecto/volumen nuevo revisado; no down -v ni limpiezas generales. Arranque al reiniciar: unidad systemd DEV independiente pendiente de revisión e instalación autorizada; este manifiesto conserva restart:no hasta validar convivencia. No tocar timers ni unidades PROD. No implica promoción, OIDC ni instalación real. CI prueba loopback con CA real; la accesibilidad LAN, recursos simultáneos y arranque tras reinicio se verifican posteriormente en NUC.
 
 CI inicial: app y Caddy healthy pero curl al puerto publicado falló (run 45686126222). Se separa bridge de ingreso de red interna; pendiente confirmar corrección en CI.
+
+## Contrato de entrega continua (pendiente de implementación)
+Por decisión del administrador, cada push a un PR DEV interno elegible (incluidos borradores) dispara CI, construcción única, publicación del candidato por digest en canal DEV separado y reconciliación automática del NUC tras checks. No se necesita ejecutar los comandos anteriores en cada actualización: son únicamente bootstrap/diagnóstico. No desplegar forks, autores no autorizados ni candidatos obsoletos. Un DEV compartido por app: último push elegible, serializado, con rollback a última versión sana y estado visible. Objetivo de reconciliación <=60 s tras disponibilidad del candidato, no garantía de duración de CI.
+Una sola aprobación explícita del administrador a un candidato exacto probado en DEV dispara promoción PROD automática por el mismo digest, sin nueva compilación, SSH ni segunda confirmación. Un push/merge normal a main no autoriza PROD. Preflight, backup, migración compatible, salud, auditoría y rollback automáticos; recuperación de datos solo automática si es segura para escrituras posteriores. Cambios privilegiados fuera de alcance. Migrar antes los actualizadores antiguos que siguen main. El Compose de este PR no implementa aún el reconciliador ni los workflows de publicación/promoción; seguir el ADR-002 de servidor-casa PR 31. No fusionar hasta revisión y transición autorizada.
