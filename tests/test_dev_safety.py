@@ -79,6 +79,9 @@ class WorkflowSafety(unittest.TestCase):
         self.assertIn("skopeo copy --all", text)
         self.assertIn('actual', text)
         self.assertTrue(any(step.get("if") == "always()" and "ghcr-auth.json" in step.get("run", "") for step in steps))
+        names = [step.get("name", "") for step in steps]
+        self.assertLess(names.index("Validar OCI antes de autenticar o escribir en el registro"),
+                        names.index("Autenticar solo al publicador confiable"))
 
     def test_prs_have_no_publishable_oci_artifact_or_candidate_channel(self):
         image = self.workflow["jobs"]["test-image"]
@@ -161,6 +164,31 @@ class DevPolicy(unittest.TestCase):
         self.assertTrue(all(s["restart"] == "no" for s in self.config["services"].values()))
         self.assertFalse(list((ROOT / "deploy/dev").rglob("*.timer")))
 
+    def test_slice_limits_are_enforced_not_only_declared(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); group = root / "servidor.slice/servidor-dev.slice"; group.mkdir(parents=True)
+            limits = {"memory.max": str(1152 * 1024 ** 2), "memory.swap.max": "0", "pids.max": "512", "cpu.max": "175000 100000"}
+            for name, value in limits.items(): (group / name).write_text(value)
+            def command(*args):
+                return json.dumps({"CgroupDriver": "systemd", "CgroupVersion": "2"}) if args[0] == "docker" else "/servidor.slice/servidor-dev.slice"
+            with patch.object(v, "command", side_effect=command):
+                v.resources(root)
+                for name, value in (("memory.max", str(2048 * 1024 ** 2)), ("memory.swap.max", "1"),
+                                    ("cpu.max", "200000 100000"), ("pids.max", "1024")):
+                    (group / name).write_text(value)
+                    with self.subTest(name=name), self.assertRaises(ValueError): v.resources(root)
+                    (group / name).write_text(limits[name])
+
+    def test_boot_preflight_refuses_memory_or_disk_pressure_before_dns(self):
+        from types import SimpleNamespace
+        with patch.object(Path, "read_text", return_value="MemAvailable: 100 kB\n"), patch.object(v.socket, "socket") as sock:
+            with self.assertRaisesRegex(ValueError, "host-memory-insufficient"): v.host_health()
+            sock.assert_not_called()
+        with patch.object(Path, "read_text", return_value="MemAvailable: 2097152 kB\n"), \
+                patch.object(v.shutil, "disk_usage", return_value=SimpleNamespace(free=1)), patch.object(v.socket, "socket") as sock:
+            with self.assertRaisesRegex(ValueError, "host-disk-insufficient"): v.host_health()
+            sock.assert_not_called()
+
 
 class Certificates(unittest.TestCase):
     def test_constrained_root_leaf_tls_and_invalid_domain(self):
@@ -188,6 +216,11 @@ class Certificates(unittest.TestCase):
     def test_ca_must_not_be_inside_deployable_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError): certs.issue(Path(tmp) / "tls/ca", Path(tmp) / "tls")
+
+    def test_certificate_paths_cannot_follow_symlinks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); real = root / "real"; real.mkdir(); link = root / "link"; link.symlink_to(real)
+            with self.assertRaises(ValueError): certs.issue(link, root / "tls")
 
 
 class BackupLock(unittest.TestCase):

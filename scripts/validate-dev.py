@@ -8,6 +8,7 @@ import re
 import subprocess
 import socket
 import struct
+import shutil
 
 PROJECT = "cebo-pemento-dev"
 HOST = "cebo-dev.home.arpa"
@@ -117,6 +118,10 @@ def resources(cgroup_root=Path("/sys/fs/cgroup")):
 
 
 def host_health():
+    memory = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
+    require(int(memory["MemAvailable"].split()[0]) >= 1024 * 1024, "host-memory-insufficient")
+    for path in ("/opt/servicios-dev/cebo-pemento", "/var/lib/docker"):
+        require(shutil.disk_usage(path).free >= 2 * 1024 ** 3, "host-disk-insufficient")
     require(command("findmnt", "-rn", "-M", "/srv/almacenamiento/hdd2tb", "-o", "UUID") ==
             "229b28a3-03a7-4577-ac8f-ac21614e700f", "critical-media-mount-not-ready")
     query_id = 32131

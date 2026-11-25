@@ -46,6 +46,13 @@ Aunque se sobrescriba `name:` con `-p`, los nombres de servicio DEV ya no pueden
 recrear `app`/`caddy` PROD. Nunca usar `--remove-orphans`. La validación del
 proyecto es obligatoria antes de operar; `name:` solo no es una barrera.
 
+Si ya existía un DEV antiguo, conservar su volumen de datos y respaldarlo antes
+del cambio de nombres de servicio. Detener solo sus contenedores identificados
+como proyecto `cebo-pemento-dev`, con la plantilla antigua revisada; no usar
+`--remove-orphans` ni detener el proyecto PROD. No borrar los volúmenes antiguos
+de Caddy automáticamente. Tras verificar el TLS nuevo, retirar la CA anterior
+únicamente del perfil de prueba donde se hubiera confiado.
+
 `CEBO_DEV_IMAGE`, `CEBO_DEV_HOST` y `CEBO_DEV_BIND` son obligatorios. LAN exige
 `ghcr.io/aculledor/cebo-de-pemento-dev@sha256:<64hex>`, hostname exacto y bind de
 la tabla. CI usa explícitamente el mismo hostname, loopback e ImageID inmutable
@@ -93,6 +100,8 @@ presupuesto conjunto de todo DEV: MemoryMax1152MiB, MemoryHigh1024MiB,
 MemorySwapMax0, CPUQuota175%, TasksMax512. El slice requiere Docker con driver
 systemd y cgroupv2; limitar solamente la unidad que ejecuta Compose no basta.
 El preflight comprueba archivos cgroup y pertenencia real de ambos contenedores.
+Antes del arranque LAN exige además 1GiB disponible de RAM y 2GiB libres tanto en
+la instalación DEV como en el almacenamiento Docker; un fallo bloquea solo DEV.
 
 App pertenece solo a la red interna; gateway usa también ingress para DNAT.
 Ambas redes son propias y sin `external` ni `driver_opts`, compatible con PR #34.

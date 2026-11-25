@@ -71,6 +71,13 @@ jobs:
         run: |
           image_id=$(docker image inspect cebo-pemento:ci --format '{{.Id}}')
           sudo env CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted CEBO_DEV_IMAGE="$image_id" bash scripts/dev-compose-smoke.sh
+      - name: Verificar que los smoke no sustituyeron el OCI construido
+        env: { EXPECTED_DIGEST: '${{ steps.build.outputs.digest }}' }
+        run: |
+          set -euo pipefail
+          skopeo inspect --raw "oci-archive:$RUNNER_TEMP/cebo.oci.tar" > "$RUNNER_TEMP/checked-oci.json"
+          actual="sha256:$(sha256sum "$RUNNER_TEMP/checked-oci.json" | cut -d' ' -f1)"
+          [[ "$actual" == "$EXPECTED_DIGEST" ]]
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
@@ -89,6 +96,14 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { name: cebo-tested-oci, path: '${{ runner.temp }}/tested' }
       - run: sudo apt-get update -qq && sudo apt-get install -y skopeo
+      - name: Validar OCI antes de autenticar o escribir en el registro
+        env: { EXPECTED_DIGEST: '${{ needs.test-image.outputs.digest }}' }
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          skopeo inspect --raw "oci-archive:$RUNNER_TEMP/tested/cebo.oci.tar" > "$RUNNER_TEMP/checked-oci.json"
+          actual="sha256:$(sha256sum "$RUNNER_TEMP/checked-oci.json" | cut -d' ' -f1)"
+          [[ "$actual" == "$EXPECTED_DIGEST" ]]
       - name: Autenticar solo al publicador confiable
         env: { GHCR_TOKEN: '${{ github.token }}' }
         run: |

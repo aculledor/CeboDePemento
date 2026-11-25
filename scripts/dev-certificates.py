@@ -14,6 +14,9 @@ def run(*args):
 
 
 def issue(ca_dir, tls_dir):
+    for provided in (Path(ca_dir).absolute(), Path(tls_dir).absolute()):
+        if any(part.is_symlink() for part in [provided, *provided.parents]):
+            raise ValueError("Certificate paths must not contain symlinks")
     ca, tls = Path(ca_dir).resolve(), Path(tls_dir).resolve()
     if ca == tls or ca.is_relative_to(tls) or tls.is_relative_to(ca):
         raise ValueError("CA and deployable TLS directories must be separate")
