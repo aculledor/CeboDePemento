@@ -59,9 +59,9 @@ ORIGINAL_PROCESS_RUN=p.subprocess.run
 
 def observed_process(*args,**kwargs):
     result=ORIGINAL_PROCESS_RUN(*args,**kwargs)
-    if result.returncode:
+    if result.returncode and isinstance(result.stderr,str):
         text=(result.stderr or '').lower()
-        codes=(('auth.json','credential-file'),('permission denied','permission-denied'),
+        codes=(('/run/containers/','default-runtime-credential-file'),('auth.json','credential-file'),('permission denied','permission-denied'),
                ('operation not permitted','operation-not-permitted'),
                ('http response to https client','registry-tls'),('x509:','registry-certificate'),
                ('connection refused','registry-unavailable'),('unauthorized','registry-auth'),
@@ -76,6 +76,7 @@ p.subprocess.run=observed_process
 
 # Static command phases only; arguments and subprocess output never reach logs.
 ORIGINAL_RUN=p.run
+LEGACY_REJECTED=False
 
 def observed_run(args,raw=False,**kwargs):
     command='local-command'
@@ -87,11 +88,21 @@ def observed_run(args,raw=False,**kwargs):
     elif args[:2]==['docker','exec']:command='runtime-health'
     elif args[:3]==['docker','image','inspect']:command='runtime-identity'
     emit('command',stage=command)
+    global LEGACY_REJECTED
+    if command=='registry-copy' and not LEGACY_REJECTED:
+        old=args.copy();index=old.index('--authfile');del old[index:index+2]
+        try:ORIGINAL_RUN(old,raw=raw,**kwargs)
+        except ValueError as error:
+            # The synthetic unreadable default auth file models the real failure.
+            if p.diagnostic_record(error)['code']!='credential-file-permission':raise
+            LEGACY_REJECTED=True;emit('legacy-auth-rejected',stage=command)
+        else:raise ValueError('legacy-auth-not-reproduced')
     return ORIGINAL_RUN(args,raw=raw,**kwargs)
 
 p.run=observed_run
 
 def main():
+    if os.geteuid()==0:raise ValueError('unprivileged-probe-required')
     if not (os.environ.get('CI')=='true' and os.environ.get('GITHUB_ACTIONS')=='true' and
             os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted' and os.uname().nodename!='nuc-cas'):
         raise ValueError('hosted-fixture-only')
@@ -106,7 +117,11 @@ def main():
         phase('oci-inspect');digest=p.inspect_oci(path,cfg,meta['sha'])
         # No further API access; code under test receives no GitHub credential.
         api.token='';os.environ.pop('GH_TOKEN',None)
+        home=Path(tmp)/'fixture-home';auth=home/'.config/containers/auth.json'
+        auth.parent.mkdir(parents=True);auth.write_text('{"auths":{}}');auth.chmod(0)
+        os.environ['HOME']=str(home)
         phase('oci-runtime');p.test_digest(path,cfg,digest,tmp)
+        if not LEGACY_REJECTED:raise ValueError('legacy-auth-not-reproduced')
         phase('oci-recheck');p.require(p.inspect_oci(path,cfg,meta['sha'])==digest,'tested-oci-changed')
     emit('success',stage='complete',candidate_created=False,published=False)
 
@@ -114,7 +129,6 @@ def main():
 if __name__=='__main__':
     try:main()
     except Exception as error:
-        text=str(error) if type(error) is ValueError else ''
-        code=text if text in CODES or text in {'github-response-'+str(s) for s in HTTP} else 'unclassified-error'
-        emit('rejected',stage=CURRENT,code=code)
+        record=p.diagnostic_record(error)
+        emit('rejected',stage=CURRENT,diagnostic=record)
         raise SystemExit(1)

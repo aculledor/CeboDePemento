@@ -169,6 +169,8 @@ def extract_build(archive,work):
 def run(args, raw=False, step='local-command'):
     with stage(step):
         result=subprocess.run(args,capture_output=True,text=True,timeout=300,env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','HOME':os.environ.get('HOME','/root'),'LANG':'C.UTF-8'})
+        if result.returncode and 'auth.json' in result.stderr and 'permission denied' in result.stderr.lower():
+            raise ValueError('credential-file-permission')
         require(result.returncode==0,'command-failed')
         return result.stdout if raw else result.stdout.strip()
 
@@ -191,6 +193,10 @@ def runtime_fixture(cfg):
 def test_digest(path,cfg,digest,work):
     require(os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted' and not os.environ.get('DOCKER_HOST') and os.uname().nodename!='nuc-cas','hosted-fixture-only')
     suffix=str(os.getpid());registry='specops-registry-'+suffix;app='specops-app-'+suffix
+    # Anonymous loopback only. Never discover runner/root credentials implicitly.
+    auth=Path(work)/'loopback-auth.json'
+    with auth.open('x') as file:
+        os.fchmod(file.fileno(),0o600);file.write('{"auths":{}}')
     try:
         run(['docker','run','-d','--name',registry,'--memory','512m','--tmpfs','/var/lib/registry:rw,size=768m','-p','127.0.0.1::5000','registry:2.8.3'],step='registry-start')
         endpoint=run(['docker','port',registry,'5000/tcp'],step='registry-port');require(re.fullmatch(r'127\.0\.0\.1:[0-9]+',endpoint),'registry-loopback')
@@ -198,8 +204,8 @@ def test_digest(path,cfg,digest,work):
             try:urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://'+endpoint+'/v2/',timeout=1).close();break
             except OSError:time.sleep(.25)
         ref=endpoint+'/specops-fixture@'+digest
-        run(['skopeo','copy','--all','--preserve-digests','--dest-tls-verify=false','oci-archive:'+str(path),'docker://'+endpoint+'/specops-fixture:tested'],step='registry-copy')
-        remote=run(['skopeo','inspect','--raw','--tls-verify=false','docker://'+endpoint+'/specops-fixture:tested'], raw=True,step='registry-inspect')
+        run(['skopeo','copy','--authfile',str(auth),'--all','--preserve-digests','--dest-tls-verify=false','oci-archive:'+str(path),'docker://'+endpoint+'/specops-fixture:tested'],step='registry-copy')
+        remote=run(['skopeo','inspect','--authfile',str(auth),'--raw','--tls-verify=false','docker://'+endpoint+'/specops-fixture:tested'], raw=True,step='registry-inspect')
         require('sha256:'+hashlib.sha256(remote.encode()).hexdigest()==digest,'registry-rewrote-digest')
         run(['docker','pull','--platform','linux/amd64',ref],step='runtime-pull')
         args=['docker','run','-d','--name',app,'--network','none','--read-only','--user','1000:1000','--cap-drop','ALL','--security-opt','no-new-privileges','--memory','512m','--memory-swap','512m','--cpus','.5','--pids-limit','128','--tmpfs','/tmp:uid=1000,gid=1000,size=16m']
