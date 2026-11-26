@@ -53,10 +53,31 @@ class ReadAPI(p.API):
         return super().request(path,method,body)
 
 
+# Static classifications only. Process output is inspected in memory and never
+# printed, serialized or uploaded, including on an unknown error.
+ORIGINAL_PROCESS_RUN=p.subprocess.run
+
+def observed_process(*args,**kwargs):
+    result=ORIGINAL_PROCESS_RUN(*args,**kwargs)
+    if result.returncode:
+        text=(result.stderr or '').lower()
+        codes=(('auth.json','credential-file'),('permission denied','permission-denied'),
+               ('operation not permitted','operation-not-permitted'),
+               ('http response to https client','registry-tls'),('x509:','registry-certificate'),
+               ('connection refused','registry-unavailable'),('unauthorized','registry-auth'),
+               ('toomanyrequests','registry-rate-limit'),('unsupported','unsupported-format'),
+               ('no such file','missing-local-input'),('digest','digest-preservation'))
+        matched=[code for needle,code in codes if needle in text]
+        emit('command-rejected',code=matched[0] if matched else 'unclassified-command',
+             categories=matched,exit=result.returncode if result.returncode in (1,2,125,126,127,137,-9,-15) else 'other')
+    return result
+
+p.subprocess.run=observed_process
+
 # Static command phases only; arguments and subprocess output never reach logs.
 ORIGINAL_RUN=p.run
 
-def observed_run(args,raw=False):
+def observed_run(args,raw=False,**kwargs):
     command='local-command'
     if args[:2]==['skopeo','copy']:command='registry-copy'
     elif args[:2]==['skopeo','inspect']:command='registry-inspect' if any(a.startswith('docker://') for a in args) else 'oci-inspect'
@@ -66,7 +87,7 @@ def observed_run(args,raw=False):
     elif args[:2]==['docker','exec']:command='runtime-health'
     elif args[:3]==['docker','image','inspect']:command='runtime-identity'
     emit('command',stage=command)
-    return ORIGINAL_RUN(args,raw=raw)
+    return ORIGINAL_RUN(args,raw=raw,**kwargs)
 
 p.run=observed_run
 

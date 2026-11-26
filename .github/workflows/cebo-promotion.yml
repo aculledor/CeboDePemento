@@ -36,6 +36,60 @@ jobs:
         SPECOPS_MODE: prepare
       run: |-
         python3 - <<'SPECOPS_INLINE'
+        """Fixed diagnostic vocabulary. Never format exceptions, commands or remote data."""
+        from contextlib import contextmanager
+        from functools import wraps
+        import json
+        import subprocess
+
+        SAFE_CODES=frozenset('api-list api-pagination-limit api-path api-size api-url artifact-checksum artifact-host artifact-redirects artifact-size artifact-size-or-checksum baseline-bootstrap baseline-image build-artifact-ambiguous build-artifact-members build-size candidate-archive-size candidate-artifact candidate-contract candidate-evidence-absent candidate-fields candidate-hashes candidate-numbers candidate-obsolete candidate-target ci-after-merge ci-job-provenance ci-jobs-absent ci-pr-association ci-pr-not-merged ci-pr-number ci-timestamp command-failed dev-receipt-format github-token-missing github-unavailable hosted-fixture-only main-source-not-integrated migration-not-supported-v1 oci-platform oci-provenance output-format previous-candidate-tree previous-promotion-still-pending producer-mode promotion-admin-gate promotion-candidate promotion-dev-receipt promotion-document promotion-files promotion-format promotion-revoked proposal-branch-unavailable published-digest-changed publisher-run registry-loopback registry-rewrote-digest required-ci source-actor source-candidate-mismatch source-ci source-ci-absent source-obsolete source-outside-scope source-pr source-pr-association source-pr-not-merged source-pr-number source-pr-state source-provenance source-run source-run-id source-tree tested-image-identity tested-oci-changed trusted-integration-retry trusted-main trusted-main-first-attempt verified-input-changed workflow-repository invalid-json evidence-shape command-timeout local-io invalid-evidence internal-error'.split())
+        HTTP_CODES=frozenset('github-response-'+str(n) for n in (301,302,303,307,308,400,401,403,404,408,409,410,412,422,429,500,502,503,504))
+        STAGES=frozenset('entrypoint event-validation api-read provenance candidate-discovery artifact-metadata artifact-download artifact-checksum artifact-extract oci-index oci-config registry-start registry-port registry-copy registry-inspect runtime-pull runtime-start runtime-health runtime-identity candidate-bind promotion-prepare source-integration local-command'.split())
+        _STACK=[]
+
+
+        def reason(error):
+            if isinstance(error,Failure):return error.code if error.code in SAFE_CODES|HTTP_CODES else 'internal-error'
+            if isinstance(error,json.JSONDecodeError):return 'invalid-json'
+            if isinstance(error,subprocess.TimeoutExpired):return 'command-timeout'
+            if isinstance(error,(KeyError,TypeError,IndexError)):return 'evidence-shape'
+            if isinstance(error,OSError):return 'local-io'
+            if type(error) is ValueError:
+                # Membership in a static allowlist, never exception interpolation.
+                value=str(error)
+                return value if value in SAFE_CODES|HTTP_CODES else 'invalid-evidence'
+            return 'internal-error'
+
+
+        class Failure(ValueError):
+            def __init__(self,context,code):
+                super().__init__(code);self.context=context;self.code=code
+
+
+        @contextmanager
+        def stage(name):
+            if name not in STAGES:raise Failure(('entrypoint',),'internal-error')
+            _STACK.append(name)
+            try:yield
+            except Failure:raise
+            except Exception as error:raise Failure(tuple(_STACK),reason(error)) from None
+            finally:_STACK.pop()
+
+
+        def diagnostic(name):
+            def decorate(function):
+                @wraps(function)
+                def wrapped(*args,**kwargs):
+                    with stage(name):return function(*args,**kwargs)
+                return wrapped
+            return decorate
+
+
+        def diagnostic_record(error):
+            context=error.context if isinstance(error,Failure) else ('entrypoint',)
+            if not isinstance(context,tuple) or not context or any(type(s) is not str or s not in STAGES for s in context):context=('entrypoint',)
+            return {'protocol':'specops-producer-v1','result':'rejected','stage':context[-1],'context':list(context),'code':reason(error)}
+
         """CI/PR binding after GitHub clears run.pull_requests on merge.
 
         Shared byte-for-byte with candidate producers. No network or mutable timestamps.
@@ -114,6 +168,7 @@ jobs:
         import zipfile
 
 
+
         CONFIG = {'app': 'cebo', 'repository': 'aculledor/CeboDePemento', 'image': 'ghcr.io/aculledor/cebo-de-pemento-dev', 'source_path': '.github/workflows/ci-ghcr.yml', 'publisher_path': '.github/workflows/cebo-specops.yml', 'build_artifact': 'specops-cebo-build-v1', 'schema': 0, 'frozen_paths': ['apps/api/migrations/'], 'port': 3001, 'health': '/api/health', 'required_workflows': ['.github/workflows/ci-ghcr.yml'], 'candidate_paths': ['Dockerfile', '.dockerignore', 'package.json', 'package-lock.json', 'tsconfig.base.json', 'apps/', 'packages/', 'catalogo.sqlite', '.github/workflows/ci-ghcr.yml', '.github/workflows/cebo-specops.yml']}
         SHA=re.compile(r'[a-f0-9]{40}\Z')
         DIGEST=re.compile(r'sha256:[a-f0-9]{64}\Z')
@@ -171,6 +226,7 @@ jobs:
                         if attempt==3:raise ValueError('github-unavailable') from None
                         time.sleep(2**attempt)
                 raise ValueError('artifact-redirects')
+            @diagnostic('api-read')
             def request(self,path,method='GET',body=None):
                 require(path.startswith('/repos/') or path=='/graphql','api-path')
                 require(all(p not in ('.','..') for p in urllib.parse.unquote(urllib.parse.urlsplit(path).path).split('/')),'api-path')
@@ -186,6 +242,7 @@ jobs:
                     if minimum_id and any(row['id']<minimum_id for row in rows):return result
                     if len(rows)<100:return result
                 raise ValueError('api-pagination-limit')
+            @diagnostic('artifact-download')
             def archive(self,repo,artifact,destination):
                 require(DIGEST.fullmatch(artifact['digest']) and artifact['size_in_bytes']<=768*1024**2,'artifact-size-or-checksum')
                 path=Path(destination)
@@ -193,7 +250,8 @@ jobs:
                     digest=hashlib.sha256();size=0
                     while chunk:=response.read(1024*1024):
                         size+=len(chunk);require(size<=768*1024**2,'artifact-size');digest.update(chunk);output.write(chunk)
-                require('sha256:'+digest.hexdigest()==artifact['digest'],'artifact-checksum')
+                with stage('artifact-checksum'):
+                    require('sha256:'+digest.hexdigest()==artifact['digest'],'artifact-checksum')
                 return path
 
 
@@ -218,6 +276,7 @@ jobs:
                 ci_before_merge(run,pr,jobs)
 
 
+        @diagnostic('provenance')
         def provenance(api,cfg,run_id,open_only=True,pr_number=None):
             repo='/repos/'+cfg['repository'];run=api.request(repo+f'/actions/runs/{int(run_id)}')
             require(run['id']==int(run_id),'source-run-id')
@@ -237,12 +296,14 @@ jobs:
             return {'sha':run['head_sha'],'tree':tree,'pr':pr['number'],'source_run':run['id']}
 
 
+        @diagnostic('artifact-metadata')
         def build_artifact(api,cfg,run_id):
             artifacts=api.pages('/repos/'+cfg['repository']+f'/actions/runs/{int(run_id)}/artifacts','artifacts')
             matches=[a for a in artifacts if a['name']==cfg['build_artifact'] and not a['expired']]
             require(len(matches)==1,'build-artifact-ambiguous');return matches[0]
 
 
+        @diagnostic('artifact-extract')
         def extract_build(archive,work):
             with zipfile.ZipFile(archive) as z:
                 require(z.namelist()==['image.oci.tar'],'build-artifact-members')
@@ -252,17 +313,18 @@ jobs:
             return path
 
 
-        def run(args, raw=False):
-            result=subprocess.run(args,capture_output=True,text=True,timeout=300,env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','HOME':os.environ.get('HOME','/root'),'LANG':'C.UTF-8'})
-            require(result.returncode==0,'command-failed')
-            return result.stdout if raw else result.stdout.strip()
+        def run(args, raw=False, step='local-command'):
+            with stage(step):
+                result=subprocess.run(args,capture_output=True,text=True,timeout=300,env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','HOME':os.environ.get('HOME','/root'),'LANG':'C.UTF-8'})
+                require(result.returncode==0,'command-failed')
+                return result.stdout if raw else result.stdout.strip()
 
 
         def inspect_oci(path,cfg,sha):
-            raw=run(['skopeo','inspect','--raw','oci-archive:'+str(path)], raw=True)
+            raw=run(['skopeo','inspect','--raw','oci-archive:'+str(path)], raw=True,step='oci-index')
             index=json.loads(raw);manifests=index.get('manifests',[])
             require(sum(m.get('platform',{}).get('os')=='linux' and m.get('platform',{}).get('architecture')=='amd64' for m in manifests)==1,'oci-platform')
-            info=json.loads(run(['skopeo','inspect','--override-os','linux','--override-arch','amd64','--config','oci-archive:'+str(path)]))
+            info=json.loads(run(['skopeo','inspect','--override-os','linux','--override-arch','amd64','--config','oci-archive:'+str(path)],step='oci-config'))
             require(info['os']=='linux' and info['architecture']=='amd64' and info['config']['Labels']['org.opencontainers.image.revision']==sha and info['config']['Labels']['org.opencontainers.image.source']=='https://github.com/'+cfg['repository'],'oci-provenance')
             return 'sha256:'+hashlib.sha256(raw.encode()).hexdigest()
 
@@ -277,30 +339,30 @@ jobs:
             require(os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted' and not os.environ.get('DOCKER_HOST') and os.uname().nodename!='nuc-cas','hosted-fixture-only')
             suffix=str(os.getpid());registry='specops-registry-'+suffix;app='specops-app-'+suffix
             try:
-                run(['docker','run','-d','--name',registry,'--memory','512m','--tmpfs','/var/lib/registry:rw,size=768m','-p','127.0.0.1::5000','registry:2.8.3'])
-                endpoint=run(['docker','port',registry,'5000/tcp']);require(re.fullmatch(r'127\.0\.0\.1:[0-9]+',endpoint),'registry-loopback')
+                run(['docker','run','-d','--name',registry,'--memory','512m','--tmpfs','/var/lib/registry:rw,size=768m','-p','127.0.0.1::5000','registry:2.8.3'],step='registry-start')
+                endpoint=run(['docker','port',registry,'5000/tcp'],step='registry-port');require(re.fullmatch(r'127\.0\.0\.1:[0-9]+',endpoint),'registry-loopback')
                 for _ in range(40):
                     try:urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://'+endpoint+'/v2/',timeout=1).close();break
                     except OSError:time.sleep(.25)
                 ref=endpoint+'/specops-fixture@'+digest
-                run(['skopeo','copy','--all','--preserve-digests','--dest-tls-verify=false','oci-archive:'+str(path),'docker://'+endpoint+'/specops-fixture:tested'])
-                remote=run(['skopeo','inspect','--raw','--tls-verify=false','docker://'+endpoint+'/specops-fixture:tested'], raw=True)
+                run(['skopeo','copy','--all','--preserve-digests','--dest-tls-verify=false','oci-archive:'+str(path),'docker://'+endpoint+'/specops-fixture:tested'],step='registry-copy')
+                remote=run(['skopeo','inspect','--raw','--tls-verify=false','docker://'+endpoint+'/specops-fixture:tested'], raw=True,step='registry-inspect')
                 require('sha256:'+hashlib.sha256(remote.encode()).hexdigest()==digest,'registry-rewrote-digest')
-                run(['docker','pull','--platform','linux/amd64',ref])
+                run(['docker','pull','--platform','linux/amd64',ref],step='runtime-pull')
                 args=['docker','run','-d','--name',app,'--network','none','--read-only','--user','1000:1000','--cap-drop','ALL','--security-opt','no-new-privileges','--memory','512m','--memory-swap','512m','--cpus','.5','--pids-limit','128','--tmpfs','/tmp:uid=1000,gid=1000,size=16m']
                 fixture=runtime_fixture(cfg)
                 if fixture:
                     file=Path(work)/'fixture.json';file.write_text(json.dumps(fixture));file.chmod(0o644)
                     args+=['--tmpfs','/data:uid=1000,gid=1000,size=32m','-e','PORTAL_CONFIG=/fixture.json','-e','PORTAL_DATA_DIR=/data','-v',str(file)+':/fixture.json:ro']
                 else:args+=['--tmpfs','/app/data:uid=1000,gid=1000,size=64m','-e','APP_ORIGINS=https://fixture.invalid','-e','BACKUP_INTERVAL_HOURS=0']
-                run(args+[ref])
+                run(args+[ref],step='runtime-start')
                 for attempt in range(60):
                     try:
-                        run(['docker','exec',app,'node','-e',f"fetch('http://127.0.0.1:{cfg['port']}{cfg['health']}').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]);break
+                        run(['docker','exec',app,'node','-e',f"fetch('http://127.0.0.1:{cfg['port']}{cfg['health']}').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"],step='runtime-health');break
                     except ValueError:
                         if attempt==59:raise
                         time.sleep(1)
-                info=json.loads(run(['docker','image','inspect',ref]))[0]
+                info=json.loads(run(['docker','image','inspect',ref],step='runtime-identity'))[0]
                 require(ref in info['RepoDigests'] and info['Os']=='linux' and info['Architecture']=='amd64','tested-image-identity')
                 print('Exact OCI index tested via loopback digest; no credentials in the application runner.')
             finally:
@@ -315,6 +377,7 @@ jobs:
             return meta,path
 
 
+        @diagnostic('candidate-bind')
         def make_candidate(cfg,meta,publisher_run,attempt):
             return candidate({'version':1,'app':cfg['app'],'repository':cfg['repository'],'pr':meta['pr'],'sha':meta['sha'],'tree':meta['tree'],'image':cfg['image'],'digest':meta['digest'],'platform':'linux/amd64','source_run':meta['source_run'],'publisher_run':int(publisher_run),'publisher_attempt':int(attempt),'tested_digest':meta['digest'],'migration':'none','schema':cfg['schema']},cfg)
 
@@ -361,6 +424,7 @@ jobs:
                 yield c
 
 
+        @diagnostic('candidate-discovery')
         def already_published(api,cfg,meta):
             for c in publisher_candidates(api,cfg,minimum_id=meta['source_run']):
                 if c['source_run']==meta['source_run'] and c['sha']==meta['sha']:
@@ -369,6 +433,7 @@ jobs:
             return False
 
 
+        @diagnostic('candidate-discovery')
         def trusted_candidate(api,cfg,sha,candidate_id):
             source=api.request('/repos/'+cfg['repository']+'/actions/workflows/'+cfg['source_path'].rsplit('/',1)[-1])
             runs=api.pages('/repos/'+cfg['repository']+f'/actions/workflows/{source["id"]}/runs?head_sha={sha}&event=pull_request','workflow_runs')
@@ -379,6 +444,7 @@ jobs:
             raise ValueError('candidate-evidence-absent')
 
 
+        @diagnostic('promotion-prepare')
         def prepare_promotion(api,cfg,sha,description):
             require(re.fullmatch(r'[a-f0-9]{64}:[a-f0-9]{64}',description),'dev-receipt-format')
             candidate_id,receipt_hash=description.split(':');c=trusted_candidate(api,cfg,sha,candidate_id)
@@ -415,6 +481,7 @@ jobs:
             return doc
 
 
+        @diagnostic('source-integration')
         def integrate(api,cfg,number):
             control='/repos/'+CONTROL;pr=api.request(control+f'/pulls/{int(number)}')
             target='specops-promotions/'+cfg['app']
@@ -472,6 +539,7 @@ jobs:
                     require(re.fullmatch(r'[a-z_]+',key) and '\n' not in str(value) and '\r' not in str(value),'output-format');file.write(key+'='+str(value)+'\n')
 
 
+        @diagnostic('event-validation')
         def main():
             cfg=CONFIG;mode=os.environ['SPECOPS_MODE'];api=API(os.environ['GH_TOKEN'])
             require(os.environ['GITHUB_REPOSITORY']==cfg['repository'] if mode not in ('integrate',) else os.environ['GITHUB_REPOSITORY']==CONTROL,'workflow-repository')
@@ -522,8 +590,8 @@ jobs:
 
         if __name__=='__main__':
             try:main()
-            except Exception:
-                print('SpecOps producer rejected stale, unauthorized or invalid evidence; no sensitive diagnostics.')
+            except Exception as error:
+                print(json.dumps(diagnostic_record(error),sort_keys=True))
                 raise SystemExit(1)
 
         SPECOPS_INLINE
