@@ -366,6 +366,8 @@ jobs:
                 require(runs and max(runs,key=lambda r:r['id'])['conclusion']=='success','required-ci')
             source=api.request('/repos/'+cfg['repository']+f'/pulls/{c["pr"]}')
             if not source.get('merged_at'):
+                if source.get('draft'):
+                    api.request('/graphql','POST',{'query':'mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{number}}}','variables':{'id':source['node_id']}})
                 api.request('/repos/'+cfg['repository']+f'/pulls/{c["pr"]}/merge','PUT',{'merge_method':'merge','sha':c['sha'],'commit_title':'Integrate approved '+cfg['app']+' '+c['sha'][:12]})
             comparison=api.request('/repos/'+cfg['repository']+'/compare/'+c['sha']+'...main')
             require(comparison['status'] in ('ahead','identical') and comparison['merge_base_commit']['sha']==c['sha'],'main-source-not-integrated')
@@ -787,6 +789,8 @@ jobs:
                 require(runs and max(runs,key=lambda r:r['id'])['conclusion']=='success','required-ci')
             source=api.request('/repos/'+cfg['repository']+f'/pulls/{c["pr"]}')
             if not source.get('merged_at'):
+                if source.get('draft'):
+                    api.request('/graphql','POST',{'query':'mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{number}}}','variables':{'id':source['node_id']}})
                 api.request('/repos/'+cfg['repository']+f'/pulls/{c["pr"]}/merge','PUT',{'merge_method':'merge','sha':c['sha'],'commit_title':'Integrate approved '+cfg['app']+' '+c['sha'][:12]})
             comparison=api.request('/repos/'+cfg['repository']+'/compare/'+c['sha']+'...main')
             require(comparison['status'] in ('ahead','identical') and comparison['merge_base_commit']['sha']==c['sha'],'main-source-not-integrated')
@@ -1215,6 +1219,8 @@ jobs:
                 require(runs and max(runs,key=lambda r:r['id'])['conclusion']=='success','required-ci')
             source=api.request('/repos/'+cfg['repository']+f'/pulls/{c["pr"]}')
             if not source.get('merged_at'):
+                if source.get('draft'):
+                    api.request('/graphql','POST',{'query':'mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{number}}}','variables':{'id':source['node_id']}})
                 api.request('/repos/'+cfg['repository']+f'/pulls/{c["pr"]}/merge','PUT',{'merge_method':'merge','sha':c['sha'],'commit_title':'Integrate approved '+cfg['app']+' '+c['sha'][:12]})
             comparison=api.request('/repos/'+cfg['repository']+'/compare/'+c['sha']+'...main')
             require(comparison['status'] in ('ahead','identical') and comparison['merge_base_commit']['sha']==c['sha'],'main-source-not-integrated')

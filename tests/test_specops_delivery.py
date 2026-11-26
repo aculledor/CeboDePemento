@@ -26,7 +26,7 @@ def encoded(v):return {'content':base64.b64encode(json.dumps(v).encode()).decode
 class Fake:
  def __init__(self):
   self.mutations=[];self.files=[{'filename':next(s for s in CFG['candidate_paths'] if s.endswith('/'))+'server.ts'}]
-  self.source={'number':7,'state':'open','head':{'sha':SHA,'repo':{'full_name':CFG['repository']}},'base':{'ref':'main','repo':{'full_name':CFG['repository']}},'user':{'id':p.OWNER}}
+  self.source={'number':7,'draft':True,'node_id':'SOURCE_FIXTURE','state':'open','head':{'sha':SHA,'repo':{'full_name':CFG['repository']}},'base':{'ref':'main','repo':{'full_name':CFG['repository']}},'user':{'id':p.OWNER}}
   self.run={'id':100,'workflow_id':10,'repository':{'full_name':CFG['repository']},'head_repository':{'full_name':CFG['repository']},'head_sha':SHA,'path':CFG['source_path'],'event':'pull_request','actor':{'id':p.OWNER},'triggering_actor':{'id':p.OWNER},'status':'completed','conclusion':'success','pull_requests':[{'number':7}]}
   self.latest=100;self.c=value();self.old=CFG['image'].removesuffix('-dev')+'@sha256:'+'d'*64
   self.doc={'version':1,'app':APP,'candidate':self.c,'candidate_id':p.identity(self.c),'previous_image':self.old,'dev_receipt':'e'*64,'promotion_pr':9}
@@ -112,7 +112,7 @@ class Delivery(unittest.TestCase):
   with self.assertRaises(ValueError):p.baseline(api,CFG,api.doc)
  def test_admin_merge_integrates_exact_sha_with_normal_merge(self):
   api=Fake();self.assertEqual(p.integrate(api,CFG,9),api.c)
-  self.assertEqual(len(api.mutations),1);path,method,body=api.mutations[0]
+  self.assertEqual(len(api.mutations),2);self.assertEqual(api.mutations[0][0],'/graphql');self.assertEqual(api.mutations[0][2]['variables']['id'],'SOURCE_FIXTURE');path,method,body=api.mutations[1]
   self.assertTrue(path.endswith('/pulls/7/merge'));self.assertEqual(method,'PUT');self.assertEqual(body['sha'],SHA);self.assertEqual(body['merge_method'],'merge')
   api.source['merged_at']='fixture';api.mutations=[];p.integrate(api,CFG,9);self.assertEqual(api.mutations,[])
  def test_gate_no_unauthorized_source_merge(self):
