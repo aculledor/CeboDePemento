@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: { persist-credentials: false }
+        with: { persist-credentials: false, ref: "${{ github.event.pull_request.head.sha || github.sha }}" }
       - name: Verificar ausencia de credenciales antes de ejecutar código
         run: |
           set -euo pipefail
@@ -56,7 +56,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: { persist-credentials: false }
+        with: { persist-credentials: false, ref: "${{ github.event.pull_request.head.sha || github.sha }}" }
       - name: Verificar ausencia de credenciales antes de ejecutar código
         run: |
           set -euo pipefail
@@ -74,14 +74,14 @@ jobs:
           context: .
           platforms: linux/amd64
           push: false
-          outputs: type=oci,dest=${{ runner.temp }}/cebo.oci.tar
+          outputs: type=oci,dest=${{ runner.temp }}/image.oci.tar
           provenance: mode=max
           sbom: true
-          build-args: REVISION=${{ github.sha }}
+          build-args: REVISION=${{ github.event.pull_request.head.sha || github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Importar el artefacto construido sin reconstruirlo
-        run: skopeo copy --override-os linux --override-arch amd64 "oci-archive:$RUNNER_TEMP/cebo.oci.tar" docker-daemon:cebo-pemento:ci
+        run: skopeo copy --override-os linux --override-arch amd64 "oci-archive:$RUNNER_TEMP/image.oci.tar" docker-daemon:cebo-pemento:ci
       - run: bash scripts/docker-smoke.sh cebo-pemento:ci
       - name: Probar Compose DEV aislado con TLS verificado
         run: |
@@ -91,18 +91,28 @@ jobs:
         env: { EXPECTED_DIGEST: '${{ steps.build.outputs.digest }}' }
         run: |
           set -euo pipefail
-          skopeo inspect --raw "oci-archive:$RUNNER_TEMP/cebo.oci.tar" > "$RUNNER_TEMP/checked-oci.json"
+          skopeo inspect --raw "oci-archive:$RUNNER_TEMP/image.oci.tar" > "$RUNNER_TEMP/checked-oci.json"
           actual="sha256:$(sha256sum "$RUNNER_TEMP/checked-oci.json" | cut -d' ' -f1)"
           [[ "$actual" == "$EXPECTED_DIGEST" ]]
       - name: Probar publicación OCI completa contra registro loopback desechable
         env: { EXPECTED_DIGEST: '${{ steps.build.outputs.digest }}' }
-        run: bash scripts/oci-registry-smoke.sh "$RUNNER_TEMP/cebo.oci.tar"
+        run: bash scripts/oci-registry-smoke.sh "$RUNNER_TEMP/image.oci.tar"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           name: cebo-tested-oci
-          path: ${{ runner.temp }}/cebo.oci.tar
+          path: ${{ runner.temp }}/image.oci.tar
           retention-days: 7
+      - name: Probar el protocolo inline del publicador en registro local (sin GHCR)
+        env: { EXPECTED_SHA: '${{ github.event.pull_request.head.sha || github.sha }}' }
+        run: sudo env CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted EXPECTED_SHA="$EXPECTED_SHA" python3 tests/specops_delivery_hosted.py "$RUNNER_TEMP/image.oci.tar"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.id == 45120213
+        with:
+          name: specops-cebo-build-v1
+          path: ${{ runner.temp }}/image.oci.tar
+          retention-days: 7
+          if-no-files-found: error
   publish:
     # This is the existing main release channel, NOT Issue #3 candidates.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -120,7 +130,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$EXPECTED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          skopeo inspect --raw "oci-archive:$RUNNER_TEMP/tested/cebo.oci.tar" > "$RUNNER_TEMP/checked-oci.json"
+          skopeo inspect --raw "oci-archive:$RUNNER_TEMP/tested/image.oci.tar" > "$RUNNER_TEMP/checked-oci.json"
           actual="sha256:$(sha256sum "$RUNNER_TEMP/checked-oci.json" | cut -d' ' -f1)"
           [[ "$actual" == "$EXPECTED_DIGEST" ]]
       - name: Autenticar solo al publicador confiable
@@ -136,7 +146,7 @@ jobs:
           umask 077
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$EXPECTED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           ref="ghcr.io/aculledor/cebo-de-pemento:sha-$GITHUB_SHA"
-          skopeo copy --all --preserve-digests --authfile "$RUNNER_TEMP/ghcr-auth.json" "oci-archive:$RUNNER_TEMP/tested/cebo.oci.tar" "docker://$ref"
+          skopeo copy --all --preserve-digests --authfile "$RUNNER_TEMP/ghcr-auth.json" "oci-archive:$RUNNER_TEMP/tested/image.oci.tar" "docker://$ref"
           skopeo inspect --authfile "$RUNNER_TEMP/ghcr-auth.json" --raw "docker://$ref" > "$RUNNER_TEMP/published-manifest.json"
           actual="sha256:$(sha256sum "$RUNNER_TEMP/published-manifest.json" | cut -d' ' -f1)"
           [[ "$actual" == "$EXPECTED_DIGEST" ]]

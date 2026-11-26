@@ -1,0 +1,355 @@
+"""Self-contained producer: no imports/checkouts of mutable repository code at runtime.
+
+CONFIG is rendered into each audited workflow. All network mutations are GitHub
+API operations guarded by provenance, or an explicit OCI copy in the write job.
+Tests inject an API; production only uses api.github.com over authenticated TLS.
+"""
+import base64
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
+
+CONFIG = {}
+SHA=re.compile(r'[a-f0-9]{40}\Z')
+DIGEST=re.compile(r'sha256:[a-f0-9]{64}\Z')
+HEX=re.compile(r'[a-f0-9]{64}\Z')
+CONTROL='aculledor/servidor-casa'
+OWNER=45120213
+
+
+def require(value, code):
+    if not value: raise ValueError(code)
+
+
+def canonical(value):
+    return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()
+
+
+def identity(value):return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def candidate(value,cfg):
+    fields={'version','app','repository','pr','sha','tree','image','digest','platform','source_run','publisher_run','publisher_attempt','tested_digest','migration','schema'}
+    require(isinstance(value,dict) and set(value)==fields,'candidate-fields')
+    require(value['version']==1 and value['app']==cfg['app'] and value['repository']==cfg['repository'] and value['image']==cfg['image'],'candidate-target')
+    for key in ('pr','source_run','publisher_run','publisher_attempt','schema','version'):
+        require(type(value[key]) is int and value[key]>=(0 if key=='schema' else 1),'candidate-numbers')
+    require(SHA.fullmatch(value['sha']) and SHA.fullmatch(value['tree']) and DIGEST.fullmatch(value['digest']),'candidate-hashes')
+    require(value['digest']==value['tested_digest'] and value['platform']=='linux/amd64' and value['migration']=='none' and value['publisher_attempt']==1 and value['schema']==cfg['schema'],'candidate-contract')
+    return value
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args):return None
+
+
+class API:
+    def __init__(self,token):
+        require(bool(token),'github-token-missing');self.token=token
+        self.opener=urllib.request.build_opener(NoRedirect(),urllib.request.ProxyHandler({}))
+    def open(self,url,method='GET',body=None,artifact=False):
+        for _ in range(4):
+            u=urllib.parse.urlsplit(url)
+            require(u.scheme=='https' and not u.username and u.port in (None,443),'api-url')
+            headers={'Accept':'application/vnd.github+json','User-Agent':'specops-producer-v1','X-GitHub-Api-Version':'2022-11-28'}
+            if u.hostname=='api.github.com': headers['Authorization']='Bearer '+self.token
+            else:require(artifact and method=='GET' and any(u.hostname.endswith(s) for s in ('.blob.core.windows.net','.actions.githubusercontent.com','.githubusercontent.com')),'artifact-host')
+            data=None if body is None else canonical(body)
+            if data is not None:headers['Content-Type']='application/json'
+            try:return self.opener.open(urllib.request.Request(url,data=data,headers=headers,method=method),timeout=60)
+            except urllib.error.HTTPError as error:
+                if artifact and error.code in (301,302,303,307,308):url=error.headers.get('Location','');continue
+                raise ValueError('github-response-'+str(error.code)) from None
+        raise ValueError('artifact-redirects')
+    def request(self,path,method='GET',body=None):
+        require(path.startswith('/repos/') or path=='/graphql','api-path')
+        require(all(p not in ('.','..') for p in urllib.parse.unquote(urllib.parse.urlsplit(path).path).split('/')),'api-path')
+        with self.open('https://api.github.com'+path,method,body) as response:
+            data=response.read(8*1024*1024+1);require(len(data)<=8*1024*1024,'api-size')
+            return json.loads(data) if data else None
+    def pages(self,path,key=None):
+        result=[]
+        for page in range(1,21):
+            value=self.request(path+('&' if '?' in path else '?')+f'per_page=100&page={page}')
+            rows=value[key] if key else value;require(isinstance(rows,list),'api-list');result+=rows
+            if len(rows)<100:return result
+        raise ValueError('api-pagination-limit')
+    def archive(self,repo,artifact,destination):
+        require(DIGEST.fullmatch(artifact['digest']) and artifact['size_in_bytes']<=768*1024**2,'artifact-size-or-checksum')
+        path=Path(destination)
+        with self.open(f'https://api.github.com/repos/{repo}/actions/artifacts/{int(artifact["id"])}/zip',artifact=True) as response,path.open('xb') as output:
+            digest=hashlib.sha256();size=0
+            while chunk:=response.read(1024*1024):
+                size+=len(chunk);require(size<=768*1024**2,'artifact-size');digest.update(chunk);output.write(chunk)
+        require('sha256:'+digest.hexdigest()==artifact['digest'],'artifact-checksum')
+        return path
+
+
+def provenance(api,cfg,run_id,open_only=True):
+    repo='/repos/'+cfg['repository'];run=api.request(repo+f'/actions/runs/{int(run_id)}')
+    require(run['repository']['full_name']==cfg['repository'] and run['head_repository']['full_name']==cfg['repository'] and run['event']=='pull_request' and run['path']==cfg['source_path'],'source-provenance')
+    require(run['actor']['id']==OWNER and run['triggering_actor']['id']==OWNER,'source-actor')
+    require(run['status']=='completed' and run['conclusion']=='success' and SHA.fullmatch(run['head_sha']),'source-ci')
+    require(len(run['pull_requests'])==1,'source-pr-association')
+    pr=api.request(repo+f'/pulls/{run["pull_requests"][0]["number"]}')
+    require(pr['head']['repo']['full_name']==cfg['repository'] and pr['base']['repo']['full_name']==cfg['repository'] and pr['base']['ref']=='main' and pr['user']['id']==OWNER,'source-pr')
+    require(pr['head']['sha']==run['head_sha'] and (pr['state']=='open' or (not open_only and pr.get('merged_at'))),'source-obsolete')
+    files=api.pages(repo+f'/pulls/{pr["number"]}/files')
+    require(not any(path==scope or scope.endswith('/') and path.startswith(scope) for f in files for path in (f.get('filename',''),f.get('previous_filename','')) for scope in cfg.get('frozen_paths',[])),'migration-not-supported-v1')
+    require(any(path==scope or scope.endswith('/') and path.startswith(scope) for f in files for path in (f.get('filename',''),f.get('previous_filename','')) for scope in cfg['candidate_paths']),'source-outside-scope')
+    runs=api.pages(repo+f'/actions/workflows/{run["workflow_id"]}/runs?head_sha={run["head_sha"]}&event=pull_request','workflow_runs')
+    require(runs and max(r['id'] for r in runs)==run['id'],'source-obsolete')
+    tree=api.request(repo+'/git/commits/'+run['head_sha'])['tree']['sha'];require(SHA.fullmatch(tree),'source-tree')
+    return {'sha':run['head_sha'],'tree':tree,'pr':pr['number'],'source_run':run['id']}
+
+
+def build_artifact(api,cfg,run_id):
+    artifacts=api.pages('/repos/'+cfg['repository']+f'/actions/runs/{int(run_id)}/artifacts','artifacts')
+    matches=[a for a in artifacts if a['name']==cfg['build_artifact'] and not a['expired']]
+    require(len(matches)==1,'build-artifact-ambiguous');return matches[0]
+
+
+def extract_build(archive,work):
+    with zipfile.ZipFile(archive) as z:
+        require(z.namelist()==['image.oci.tar'],'build-artifact-members')
+        require(z.getinfo('image.oci.tar').file_size<=1024**3,'build-size')
+        path=Path(work)/'image.oci.tar'
+        with z.open('image.oci.tar') as source,path.open('xb') as target:shutil.copyfileobj(source,target)
+    return path
+
+
+def run(args, raw=False):
+    result=subprocess.run(args,capture_output=True,text=True,timeout=300,env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','HOME':os.environ.get('HOME','/root'),'LANG':'C.UTF-8'})
+    require(result.returncode==0,'command-failed')
+    return result.stdout if raw else result.stdout.strip()
+
+
+def inspect_oci(path,cfg,sha):
+    raw=run(['skopeo','inspect','--raw','oci-archive:'+str(path)], raw=True)
+    index=json.loads(raw);manifests=index.get('manifests',[])
+    require(sum(m.get('platform',{}).get('os')=='linux' and m.get('platform',{}).get('architecture')=='amd64' for m in manifests)==1,'oci-platform')
+    info=json.loads(run(['skopeo','inspect','--override-os','linux','--override-arch','amd64','--config','oci-archive:'+str(path)]))
+    require(info['os']=='linux' and info['architecture']=='amd64' and info['config']['Labels']['org.opencontainers.image.revision']==sha and info['config']['Labels']['org.opencontainers.image.source']=='https://github.com/'+cfg['repository'],'oci-provenance')
+    return 'sha256:'+hashlib.sha256(raw.encode()).hexdigest()
+
+
+def runtime_fixture(cfg):
+    if cfg['app']=='cebo':return None
+    origin='https://portal-fixture.invalid:18543'
+    return {'origin':origin,'gatewaySecret':'a'*64,'publicOrigins':{'navidrome':'https://portal-fixture.invalid:18545','jellyfin':'https://portal-fixture.invalid:18546'},'oidc':{'issuer':'https://identity-fixture.invalid/application/o/fixture/','clientId':'fixture','clientSecret':'c'*48},'identity':{'apiOrigin':'https://identity-fixture.invalid','apiToken':'d'*48,'manageAccess':False,'enrollment':{},'recoveryPath':'/if/flow/fixture/'},'groups':{'admin':['requests'],'familiar':['requests'],'invitado':['requests']},'mappings':{},'seerr':{'baseUrl':'http://seerr:5055','apiKey':'synthetic-fixture-only','mode':'read','contractVerified':False},'navidrome':{'enabled':False,'baseUrl':'http://navidrome:4533'},'jellyfin':{'enabled':False,'baseUrl':'http://192.168.1.145:8096'}}
+
+
+def test_digest(path,cfg,digest,work):
+    require(os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted' and not os.environ.get('DOCKER_HOST') and os.uname().nodename!='nuc-cas','hosted-fixture-only')
+    suffix=str(os.getpid());registry='specops-registry-'+suffix;app='specops-app-'+suffix
+    try:
+        run(['docker','run','-d','--name',registry,'--memory','512m','--tmpfs','/var/lib/registry:rw,size=768m','-p','127.0.0.1::5000','registry:2.8.3'])
+        endpoint=run(['docker','port',registry,'5000/tcp']);require(re.fullmatch(r'127\.0\.0\.1:[0-9]+',endpoint),'registry-loopback')
+        for _ in range(40):
+            try:urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://'+endpoint+'/v2/',timeout=1).close();break
+            except OSError:time.sleep(.25)
+        ref=endpoint+'/specops-fixture@'+digest
+        run(['skopeo','copy','--all','--preserve-digests','--dest-tls-verify=false','oci-archive:'+str(path),'docker://'+endpoint+'/specops-fixture:tested'])
+        remote=run(['skopeo','inspect','--raw','--tls-verify=false','docker://'+endpoint+'/specops-fixture:tested'], raw=True)
+        require('sha256:'+hashlib.sha256(remote.encode()).hexdigest()==digest,'registry-rewrote-digest')
+        run(['docker','pull','--platform','linux/amd64',ref])
+        args=['docker','run','-d','--name',app,'--network','none','--read-only','--user','1000:1000','--cap-drop','ALL','--security-opt','no-new-privileges','--memory','512m','--memory-swap','512m','--cpus','.5','--pids-limit','128','--tmpfs','/tmp:uid=1000,gid=1000,size=16m']
+        fixture=runtime_fixture(cfg)
+        if fixture:
+            file=Path(work)/'fixture.json';file.write_text(json.dumps(fixture));file.chmod(0o644)
+            args+=['--tmpfs','/data:uid=1000,gid=1000,size=32m','-e','PORTAL_CONFIG=/fixture.json','-e','PORTAL_DATA_DIR=/data','-v',str(file)+':/fixture.json:ro']
+        else:args+=['--tmpfs','/app/data:uid=1000,gid=1000,size=64m','-e','APP_ORIGINS=https://fixture.invalid','-e','BACKUP_INTERVAL_HOURS=0']
+        run(args+[ref])
+        for attempt in range(60):
+            try:
+                run(['docker','exec',app,'node','-e',f"fetch('http://127.0.0.1:{cfg['port']}{cfg['health']}').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]);break
+            except ValueError:
+                if attempt==59:raise
+                time.sleep(1)
+        info=json.loads(run(['docker','image','inspect',ref]))[0]
+        require(ref in info['RepoDigests'] and info['Os']=='linux' and info['Architecture']=='amd64','tested-image-identity')
+        print('Exact OCI index tested via loopback digest; no credentials in the application runner.')
+    finally:
+        for name in (app,registry):subprocess.run(['docker','rm','-f',name],capture_output=True)
+
+
+def fetch_build(api,cfg,run_id,work):
+    meta=provenance(api,cfg,run_id);artifact=build_artifact(api,cfg,run_id)
+    zip_path=api.archive(cfg['repository'],artifact,Path(work)/'source.zip')
+    path=extract_build(zip_path,work);meta.update(artifact_id=artifact['id'],artifact_digest=artifact['digest'])
+    digest=inspect_oci(path,cfg,meta['sha']);meta['digest']=digest
+    return meta,path
+
+
+def make_candidate(cfg,meta,publisher_run,attempt):
+    return candidate({'version':1,'app':cfg['app'],'repository':cfg['repository'],'pr':meta['pr'],'sha':meta['sha'],'tree':meta['tree'],'image':cfg['image'],'digest':meta['digest'],'platform':'linux/amd64','source_run':meta['source_run'],'publisher_run':int(publisher_run),'publisher_attempt':int(attempt),'tested_digest':meta['digest'],'migration':'none','schema':cfg['schema']},cfg)
+
+
+def statuses(api,repo,sha,context):
+    return [s for s in api.pages('/repos/'+repo+'/commits/'+sha+'/statuses') if s['context']==context]
+
+
+def baseline(api,cfg,doc):
+    if 'candidate' not in doc:
+        require(set(doc)=={'version','app','current_image'} and doc['version']==1 and doc['app']==cfg['app'],'baseline-bootstrap')
+        return doc['current_image']
+    previous=candidate(doc['candidate'],cfg)
+    rows=statuses(api,cfg['repository'],previous['sha'],'specops/prod/'+cfg['app'])
+    require(bool(rows),'previous-promotion-still-pending')
+    status=rows[0];description=status['description'];prefix=identity(previous)+':'
+    if status['state']=='success' and description==prefix+previous['digest'].split(':')[1]:return previous['image']+'@'+previous['digest']
+    old=doc['previous_image']
+    require(status['state']=='failure' and description==prefix+old.rsplit(':',1)[1],'previous-promotion-still-pending')
+    return old
+
+
+def trusted_candidate(api,cfg,sha,candidate_id):
+    workflow=api.request('/repos/'+cfg['repository']+'/actions/workflows/'+cfg['publisher_path'].rsplit('/',1)[-1])
+    current_blob=api.request('/repos/'+cfg['repository']+'/contents/'+cfg['publisher_path']+'?ref=main')['sha']
+    runs=api.pages('/repos/'+cfg['repository']+f'/actions/workflows/{workflow["id"]}/runs?status=success','workflow_runs')
+    for run_meta in runs:
+        if run_meta['run_attempt']!=1 or run_meta['head_branch']!='main' or run_meta['event'] not in ('workflow_run','workflow_dispatch') or run_meta['actor']['id']!=OWNER or run_meta['triggering_actor']['id']!=OWNER:continue
+        blob=api.request('/repos/'+cfg['repository']+'/contents/'+cfg['publisher_path']+'?ref='+run_meta['head_sha'])['sha']
+        if blob!=current_blob:continue
+        rows=api.pages('/repos/'+cfg['repository']+f'/actions/runs/{run_meta["id"]}/artifacts','artifacts')
+        artifacts=[a for a in rows if a['name']=='specops-candidate-v1' and not a['expired']]
+        if len(artifacts)!=1:continue
+        with tempfile.TemporaryDirectory() as tmp:
+            file=api.archive(cfg['repository'],artifacts[0],Path(tmp)/'candidate.zip')
+            with zipfile.ZipFile(file) as z:
+                require(z.namelist()==['candidate.json'] and z.getinfo('candidate.json').file_size<=16384,'candidate-artifact')
+                c=candidate(json.loads(z.read('candidate.json')),cfg)
+        if c['sha']==sha and identity(c)==candidate_id:
+            require(c['publisher_run']==run_meta['id'],'publisher-run');provenance(api,cfg,c['source_run']);return c
+    raise ValueError('candidate-evidence-absent')
+
+
+def prepare_promotion(api,cfg,sha,description):
+    require(re.fullmatch(r'[a-f0-9]{64}:[a-f0-9]{64}',description),'dev-receipt-format')
+    candidate_id,receipt_hash=description.split(':');c=trusted_candidate(api,cfg,sha,candidate_id)
+    control='/repos/'+CONTROL;target='specops-promotions/'+cfg['app'];path='releases/'+cfg['app']+'.json'
+    base=api.request(control+'/branches/'+urllib.parse.quote(target,safe=''))['commit']['sha']
+    file=api.request(control+'/contents/'+path+'?ref='+urllib.parse.quote(target,safe=''))
+    current_release=json.loads(base64.b64decode(file['content']))
+    if current_release.get('candidate_id')==candidate_id:return current_release
+    previous=baseline(api,cfg,current_release)
+    require(re.fullmatch(re.escape(cfg['image'].removesuffix('-dev'))+r'(?::sha-[a-f0-9]{40})?@sha256:[a-f0-9]{64}',previous) or re.fullmatch(re.escape(cfg['image'])+r'@sha256:[a-f0-9]{64}',previous),'baseline-image')
+    proposals=api.pages(control+'/pulls?state=open&base='+urllib.parse.quote(target,safe=''))
+    branch='specops-candidate/'+cfg['app']+'/'+candidate_id[:24]
+    existing=next((p for p in proposals if p['head']['ref']==branch),None)
+    doc={'version':1,'app':cfg['app'],'candidate':c,'candidate_id':candidate_id,'previous_image':previous,'dev_receipt':receipt_hash,'promotion_pr':existing['number'] if existing else 0}
+    if not existing:
+        api.request(control+'/git/refs','POST',{'ref':'refs/heads/'+branch,'sha':base})
+        api.request(control+'/contents/'+path,'PUT',{'message':'Prepare exact '+cfg['app']+' candidate','branch':branch,'sha':file['sha'],'content':base64.b64encode(canonical(doc)).decode()})
+        existing=api.request(control+'/pulls','POST',{'base':target,'head':branch,'title':'Promote '+cfg['app']+' '+c['sha'][:12],'body':'Single administrative release approval. Exact tested digest '+c['digest']+'. Source PR #'+str(c['pr'])+'. No rebuild.','draft':True})
+        doc['promotion_pr']=existing['number']
+    for old in proposals:
+        if old['number']!=existing['number'] and old['head']['ref'].startswith('specops-candidate/'+cfg['app']+'/'):api.request(control+'/pulls/'+str(old['number']),'PATCH',{'state':'closed'})
+    current=api.request(control+'/contents/'+path+'?ref='+urllib.parse.quote(branch,safe=''))
+    if json.loads(base64.b64decode(current['content']))!=doc:
+        api.request(control+'/contents/'+path,'PUT',{'message':'Bind promotion document to its PR number','branch':branch,'sha':current['sha'],'content':base64.b64encode(canonical(doc)).decode()})
+    if existing.get('draft'):
+        api.request('/graphql','POST',{'query':'mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{number}}}','variables':{'id':existing['node_id']}})
+    return doc
+
+
+def integrate(api,cfg,number):
+    control='/repos/'+CONTROL;pr=api.request(control+f'/pulls/{int(number)}')
+    target='specops-promotions/'+cfg['app']
+    require(pr['merged'] and pr['merged_by']['id']==OWNER and pr['base']['ref']==target and pr['head']['repo']['full_name']==CONTROL,'promotion-admin-gate')
+    require(api.request(control+'/branches/'+urllib.parse.quote(target,safe=''))['commit']['sha']==pr['merge_commit_sha'],'promotion-revoked')
+    files=api.pages(control+f'/pulls/{int(number)}/files');path='releases/'+cfg['app']+'.json'
+    require(len(files)==1 and files[0]['filename']==path and files[0]['status'] in ('added','modified'),'promotion-files')
+    docs=[]
+    for ref in (pr['head']['sha'],pr['merge_commit_sha']):
+        value=api.request(control+'/contents/'+path+'?ref='+ref);docs.append(json.loads(base64.b64decode(value['content'])))
+    require(docs[0]==docs[1] and docs[0]['promotion_pr']==pr['number'],'promotion-document')
+    doc=docs[0];c=candidate(doc['candidate'],cfg);require(identity(c)==doc['candidate_id'],'promotion-candidate')
+    rows=statuses(api,cfg['repository'],c['sha'],'specops/dev/'+cfg['app'])
+    require(rows and rows[0]['state']=='success' and rows[0]['description']==doc['candidate_id']+':'+doc['dev_receipt'],'promotion-dev-receipt')
+    provenance(api,cfg,c['source_run'],open_only=False)
+    for path in cfg['required_workflows']:
+        workflow=api.request('/repos/'+cfg['repository']+'/actions/workflows/'+path.rsplit('/',1)[-1])
+        runs=api.pages('/repos/'+cfg['repository']+f'/actions/workflows/{workflow["id"]}/runs?head_sha={c["sha"]}&event=pull_request','workflow_runs')
+        require(runs and max(runs,key=lambda r:r['id'])['conclusion']=='success','required-ci')
+    source=api.request('/repos/'+cfg['repository']+f'/pulls/{c["pr"]}')
+    if not source.get('merged_at'):
+        api.request('/repos/'+cfg['repository']+f'/pulls/{c["pr"]}/merge','PUT',{'merge_method':'merge','sha':c['sha'],'commit_title':'Integrate approved '+cfg['app']+' '+c['sha'][:12]})
+    comparison=api.request('/repos/'+cfg['repository']+'/compare/'+c['sha']+'...main')
+    require(comparison['status'] in ('ahead','identical') and comparison['merge_base_commit']['sha']==c['sha'],'main-source-not-integrated')
+    return c
+
+
+def output(values):
+    with open(os.environ['GITHUB_OUTPUT'],'a') as file:
+        for key,value in values.items():
+            require(re.fullmatch(r'[a-z_]+',key) and '\n' not in str(value) and '\r' not in str(value),'output-format');file.write(key+'='+str(value)+'\n')
+
+
+def main():
+    cfg=CONFIG;mode=os.environ['SPECOPS_MODE'];api=API(os.environ['GH_TOKEN'])
+    require(os.environ['GITHUB_REPOSITORY']==cfg['repository'] if mode not in ('integrate',) else os.environ['GITHUB_REPOSITORY']==CONTROL,'workflow-repository')
+    event=json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+    if mode in ('verify','fetch','candidate'):
+        require(os.environ['GITHUB_REF']=='refs/heads/main' and os.environ['GITHUB_RUN_ATTEMPT']=='1','trusted-main-first-attempt')
+        source=int(event.get('workflow_run',{}).get('id') or event.get('inputs',{}).get('source_run',0));require(source>0,'source-run')
+        work=Path(os.environ['RUNNER_TEMP'])/('specops-'+mode);work.mkdir(mode=0o700)
+        if mode=='candidate':
+            meta=json.loads((Path(os.environ['RUNNER_TEMP'])/'specops-fetch/meta.json').read_text())
+            require(provenance(api,cfg,source)=={k:meta[k] for k in ('sha','tree','pr','source_run')},'candidate-obsolete')
+            require(os.environ['REMOTE_DIGEST']==meta['digest']==os.environ['VERIFIED_DIGEST'],'published-digest-changed')
+            value=make_candidate(cfg,meta,os.environ['GITHUB_RUN_ID'],os.environ['GITHUB_RUN_ATTEMPT'])
+            (work/'candidate.json').write_bytes(canonical(value));output({'candidate_path':str(work/'candidate.json')})
+        else:
+            meta,path=fetch_build(api,cfg,source,work)
+            if mode=='verify':
+                test_digest(path,cfg,meta['digest'],work)
+                require(inspect_oci(path,cfg,meta['sha'])==meta['digest'],'tested-oci-changed');output(meta)
+            else:
+                require(meta['digest']==os.environ['VERIFIED_DIGEST'] and str(meta['artifact_id'])==os.environ['VERIFIED_ARTIFACT_ID'] and meta['artifact_digest']==os.environ['VERIFIED_ARTIFACT_DIGEST'],'verified-input-changed')
+                (work/'meta.json').write_bytes(canonical(meta));output({'oci_path':str(path),'digest':meta['digest']})
+    elif mode=='prepare':
+        require(os.environ['GITHUB_REF']=='refs/heads/main','trusted-main')
+        # A prod receipt may unblock a newer DEV proposal. Inspect current open
+        # source PRs instead of creating a proposal for the old prod SHA.
+        choices=[]
+        for pr in api.pages('/repos/'+cfg['repository']+'/pulls?state=open&base=main'):
+            if pr['head']['repo']['full_name']!=cfg['repository'] or pr['user']['id']!=OWNER:continue
+            rows=statuses(api,cfg['repository'],pr['head']['sha'],'specops/dev/'+cfg['app'])
+            if rows and rows[0]['state']=='success':choices.append((rows[0]['id'],pr['head']['sha'],rows[0]['description']))
+        if choices:
+            _,sha,description=max(choices)
+            try:prepare_promotion(api,cfg,sha,description)
+            except ValueError as error:
+                if str(error)!='previous-promotion-still-pending':raise
+    elif mode=='integrate':
+        if 'pull_request' in event:
+            app=event['pull_request']['base']['ref'].rsplit('/',1)[-1]
+            integrate(api,cfg[app],event['pull_request']['number'])
+        else:
+            require(os.environ['GITHUB_REF']=='refs/heads/main','trusted-integration-retry')
+            for app,config in cfg.items():
+                target='specops-promotions/'+app
+                # Branches exist only after the one-time reviewed bootstrap.
+                proposals=api.pages('/repos/'+CONTROL+'/pulls?state=closed&base='+urllib.parse.quote(target,safe=''))
+                merged=next((pr for pr in proposals if pr.get('merged_at')),None)
+                if merged:integrate(api,config,merged['number'])
+    else:raise ValueError('producer-mode')
+
+
+if __name__=='__main__':
+    try:main()
+    except Exception:
+        print('SpecOps producer rejected stale, unauthorized or invalid evidence; no sensitive diagnostics.')
+        raise SystemExit(1)
