@@ -28,6 +28,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     outputs:
       digest: ${{ steps.verified.outputs.digest }}
       artifact_id: ${{ steps.verified.outputs.artifact_id }}
@@ -449,6 +450,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      pull-requests: read
       packages: write
     steps:
     - run: sudo apt-get update -qq && sudo apt-get install -y skopeo

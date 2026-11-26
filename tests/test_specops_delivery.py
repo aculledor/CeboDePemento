@@ -171,6 +171,7 @@ class Delivery(unittest.TestCase):
   for name,job in cfg['jobs'].items():
    self.assertIn('enabled-after-acceptance',job['if']);self.assertFalse(any('checkout@' in s.get('uses','') for s in job['steps']));self.assertFalse(any('docker build' in s.get('run','') for s in job['steps']))
    self.assertEqual(job['permissions'].get('packages'), 'write' if name=='publish' else None)
+   self.assertEqual(job['permissions']['pull-requests'],'read')
    for step in job['steps']:
     if 'uses' in step:self.assertRegex(step['uses'],r'@[a-f0-9]{40}$')
   upload=next(s for s in cfg['jobs']['publish']['steps'] if 'uses' in s)
