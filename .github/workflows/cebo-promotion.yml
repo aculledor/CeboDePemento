@@ -97,7 +97,7 @@ jobs:
                 require(bool(token),'github-token-missing');self.token=token
                 self.opener=urllib.request.build_opener(NoRedirect(),urllib.request.ProxyHandler({}))
             def open(self,url,method='GET',body=None,artifact=False):
-                for _ in range(4):
+                for attempt in range(4):
                     u=urllib.parse.urlsplit(url)
                     require(u.scheme=='https' and not u.username and u.port in (None,443),'api-url')
                     headers={'Accept':'application/vnd.github+json','User-Agent':'specops-producer-v1','X-GitHub-Api-Version':'2022-11-28'}
@@ -108,7 +108,12 @@ jobs:
                     try:return self.opener.open(urllib.request.Request(url,data=data,headers=headers,method=method),timeout=60)
                     except urllib.error.HTTPError as error:
                         if artifact and error.code in (301,302,303,307,308):url=error.headers.get('Location','');continue
+                        if error.code in (429,500,502,503,504) and attempt<3:
+                            time.sleep(2**attempt);continue
                         raise ValueError('github-response-'+str(error.code)) from None
+                    except (OSError,urllib.error.URLError):
+                        if attempt==3:raise ValueError('github-unavailable') from None
+                        time.sleep(2**attempt)
                 raise ValueError('artifact-redirects')
             def request(self,path,method='GET',body=None):
                 require(path.startswith('/repos/') or path=='/graphql','api-path')
@@ -116,11 +121,13 @@ jobs:
                 with self.open('https://api.github.com'+path,method,body) as response:
                     data=response.read(8*1024*1024+1);require(len(data)<=8*1024*1024,'api-size')
                     return json.loads(data) if data else None
-            def pages(self,path,key=None):
+            def pages(self,path,key=None,minimum_id=0):
                 result=[]
                 for page in range(1,21):
                     value=self.request(path+('&' if '?' in path else '?')+f'per_page=100&page={page}')
-                    rows=value[key] if key else value;require(isinstance(rows,list),'api-list');result+=rows
+                    rows=value[key] if key else value;require(isinstance(rows,list),'api-list')
+                    result += [row for row in rows if not minimum_id or row['id']>=minimum_id]
+                    if minimum_id and any(row['id']<minimum_id for row in rows):return result
                     if len(rows)<100:return result
                 raise ValueError('api-pagination-limit')
             def archive(self,repo,artifact,destination):
@@ -252,24 +259,45 @@ jobs:
             return old
 
 
-        def trusted_candidate(api,cfg,sha,candidate_id):
-            workflow=api.request('/repos/'+cfg['repository']+'/actions/workflows/'+cfg['publisher_path'].rsplit('/',1)[-1])
-            current_blob=api.request('/repos/'+cfg['repository']+'/contents/'+cfg['publisher_path']+'?ref=main')['sha']
-            runs=api.pages('/repos/'+cfg['repository']+f'/actions/workflows/{workflow["id"]}/runs?status=success','workflow_runs')
-            for run_meta in runs:
+        def publisher_candidates(api,cfg,minimum_id=0):
+            repo='/repos/'+cfg['repository']
+            workflow=api.request(repo+'/actions/workflows/'+cfg['publisher_path'].rsplit('/',1)[-1])
+            current_blob=api.request(repo+'/contents/'+cfg['publisher_path']+'?ref=main')['sha']
+            runs=api.pages(repo+f'/actions/workflows/{workflow["id"]}/runs?status=success','workflow_runs',minimum_id=minimum_id)
+            for meta in runs:
+                run_meta=api.request(repo+f'/actions/runs/{meta["id"]}')
                 if run_meta['run_attempt']!=1 or run_meta['head_branch']!='main' or run_meta['event'] not in ('workflow_run','workflow_dispatch') or run_meta['actor']['id']!=OWNER or run_meta['triggering_actor']['id']!=OWNER:continue
-                blob=api.request('/repos/'+cfg['repository']+'/contents/'+cfg['publisher_path']+'?ref='+run_meta['head_sha'])['sha']
+                if run_meta['repository']['full_name']!=cfg['repository'] or run_meta['head_repository']['full_name']!=cfg['repository'] or run_meta['workflow_id']!=workflow['id'] or run_meta['path']!=cfg['publisher_path'] or run_meta['status']!='completed' or run_meta['conclusion']!='success' or not SHA.fullmatch(run_meta['head_sha']):continue
+                blob=api.request(repo+'/contents/'+cfg['publisher_path']+'?ref='+run_meta['head_sha'])['sha']
                 if blob!=current_blob:continue
-                rows=api.pages('/repos/'+cfg['repository']+f'/actions/runs/{run_meta["id"]}/artifacts','artifacts')
+                rows=api.pages(repo+f'/actions/runs/{run_meta["id"]}/artifacts','artifacts')
                 artifacts=[a for a in rows if a['name']=='specops-candidate-v1' and not a['expired']]
                 if len(artifacts)!=1:continue
+                require(artifacts[0]['size_in_bytes']<=1024**2,'candidate-archive-size')
                 with tempfile.TemporaryDirectory() as tmp:
                     file=api.archive(cfg['repository'],artifacts[0],Path(tmp)/'candidate.zip')
                     with zipfile.ZipFile(file) as z:
                         require(z.namelist()==['candidate.json'] and z.getinfo('candidate.json').file_size<=16384,'candidate-artifact')
                         c=candidate(json.loads(z.read('candidate.json')),cfg)
+                require(c['publisher_run']==run_meta['id'],'publisher-run')
+                yield c
+
+
+        def already_published(api,cfg,meta):
+            for c in publisher_candidates(api,cfg,minimum_id=meta['source_run']):
+                if c['source_run']==meta['source_run'] and c['sha']==meta['sha']:
+                    require(c['tree']==meta['tree'],'previous-candidate-tree')
+                    return True
+            return False
+
+
+        def trusted_candidate(api,cfg,sha,candidate_id):
+            source=api.request('/repos/'+cfg['repository']+'/actions/workflows/'+cfg['source_path'].rsplit('/',1)[-1])
+            runs=api.pages('/repos/'+cfg['repository']+f'/actions/workflows/{source["id"]}/runs?head_sha={sha}&event=pull_request','workflow_runs')
+            require(bool(runs),'source-ci-absent')
+            for c in publisher_candidates(api,cfg,minimum_id=max(run['id'] for run in runs)):
                 if c['sha']==sha and identity(c)==candidate_id:
-                    require(c['publisher_run']==run_meta['id'],'publisher-run');provenance(api,cfg,c['source_run']);return c
+                    provenance(api,cfg,c['source_run']);return c
             raise ValueError('candidate-evidence-absent')
 
 
@@ -288,8 +316,15 @@ jobs:
             existing=next((p for p in proposals if p['head']['ref']==branch),None)
             doc={'version':1,'app':cfg['app'],'candidate':c,'candidate_id':candidate_id,'previous_image':previous,'dev_receipt':receipt_hash,'promotion_pr':existing['number'] if existing else 0}
             if not existing:
-                api.request(control+'/git/refs','POST',{'ref':'refs/heads/'+branch,'sha':base})
-                api.request(control+'/contents/'+path,'PUT',{'message':'Prepare exact '+cfg['app']+' candidate','branch':branch,'sha':file['sha'],'content':base64.b64encode(canonical(doc)).decode()})
+                try:
+                    api.request(control+'/git/ref/heads/'+urllib.parse.quote(branch,safe=''))
+                except ValueError as error:
+                    require(str(error)=='github-response-404','proposal-branch-unavailable')
+                    api.request(control+'/git/refs','POST',{'ref':'refs/heads/'+branch,'sha':base})
+                # Resume an interrupted prepare after ref creation or content update.
+                current=api.request(control+'/contents/'+path+'?ref='+urllib.parse.quote(branch,safe=''))
+                if json.loads(base64.b64decode(current['content']))!=doc:
+                    api.request(control+'/contents/'+path,'PUT',{'message':'Prepare exact '+cfg['app']+' candidate','branch':branch,'sha':current['sha'],'content':base64.b64encode(canonical(doc)).decode()})
                 existing=api.request(control+'/pulls','POST',{'base':target,'head':branch,'title':'Promote '+cfg['app']+' '+c['sha'][:12],'body':'Single administrative release approval. Exact tested digest '+c['digest']+'. Source PR #'+str(c['pr'])+'. No rebuild.','draft':True})
                 doc['promotion_pr']=existing['number']
             for old in proposals:
@@ -344,6 +379,8 @@ jobs:
             if mode in ('verify','fetch','candidate'):
                 require(os.environ['GITHUB_REF']=='refs/heads/main' and os.environ['GITHUB_RUN_ATTEMPT']=='1','trusted-main-first-attempt')
                 source=int(event.get('workflow_run',{}).get('id') or event.get('inputs',{}).get('source_run',0));require(source>0,'source-run')
+                if mode=='verify' and already_published(api,cfg,provenance(api,cfg,source)):
+                    output({'already_published':'true'});return
                 work=Path(os.environ['RUNNER_TEMP'])/('specops-'+mode);work.mkdir(mode=0o700)
                 if mode=='candidate':
                     meta=json.loads((Path(os.environ['RUNNER_TEMP'])/'specops-fetch/meta.json').read_text())

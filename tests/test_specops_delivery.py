@@ -120,11 +120,20 @@ class Delivery(unittest.TestCase):
    api=Fake();mutate(api)
    with self.assertRaises(ValueError):p.integrate(api,CFG,9)
    self.assertEqual(api.mutations,[])
+ def test_duplicate_publication_preserves_first_candidate_evidence(self):
+  c=value();meta={k:c[k] for k in ('sha','tree','source_run')}
+  with patch.object(p,'publisher_candidates',return_value=iter([c])):
+   self.assertTrue(p.already_published(None,CFG,meta))
+  with patch.object(p,'publisher_candidates',return_value=iter([])):
+   self.assertFalse(p.already_published(None,CFG,meta))
+  with patch.object(p,'publisher_candidates',return_value=iter([dict(c,tree='0'*40)])):
+   with self.assertRaisesRegex(ValueError,'previous-candidate-tree'):p.already_published(None,CFG,meta)
  def test_proposal_is_idempotent_binds_its_number_and_never_merges(self):
   class Proposal(Fake):
    def __init__(self):
     super().__init__();self.proposals=[];self.head={'version':1,'app':APP,'current_image':self.old};self.base=copy.deepcopy(self.head)
    def request(self,path,method='GET',body=None):
+    if method=='GET' and '/git/ref/heads/' in path:return {'object':{'sha':TREE}} # interrupted prepare already created this ref
     if method=='GET' and '/contents/releases/' in path:return encoded(self.base if 'specops-promotions' in path else self.head)
     if method=='PUT' and '/contents/releases/' in path:self.mutations.append((path,method,body));self.head=json.loads(base64.b64decode(body['content']));return {}
     if method=='POST' and path.endswith('/pulls'):
@@ -141,6 +150,7 @@ class Delivery(unittest.TestCase):
    count=len(api.mutations);self.assertEqual(p.prepare_promotion(api,CFG,SHA,receipt),doc);self.assertEqual(len(api.mutations),count)
    api.base=doc;self.assertEqual(p.prepare_promotion(api,CFG,SHA,receipt),doc);self.assertEqual(len(api.mutations),count)
   self.assertFalse(any('/merge' in call[0] for call in api.mutations))
+  self.assertFalse(any(call[0].endswith('/git/refs') for call in api.mutations)) # no duplicate orphan branch creation
   self.assertTrue(any(call[0]=='/graphql' for call in api.mutations))
  def test_artifact_checksum_and_size_reject_before_unpacking(self):
   from contextlib import closing
@@ -155,7 +165,9 @@ class Delivery(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    render(APP,tmp)
    for path in (Path(tmp)/'.github/workflows').iterdir():self.assertEqual(path.read_bytes(),(ROOT/'.github/workflows'/path.name).read_bytes())
-  cfg=yaml.safe_load((ROOT/'.github/workflows'/CFG['publisher_path'].rsplit('/',1)[-1]).read_text())
+  workflow=ROOT/'.github/workflows'/CFG['publisher_path'].rsplit('/',1)[-1]
+  self.assertLessEqual(workflow.stat().st_size,128*1024)
+  cfg=yaml.safe_load(workflow.read_text())
   for name,job in cfg['jobs'].items():
    self.assertIn('enabled-after-acceptance',job['if']);self.assertFalse(any('checkout@' in s.get('uses','') for s in job['steps']));self.assertFalse(any('docker build' in s.get('run','') for s in job['steps']))
    self.assertEqual(job['permissions'].get('packages'), 'write' if name=='publish' else None)

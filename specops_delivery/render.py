@@ -30,11 +30,11 @@ def step(config,mode,**extra):
 
 def publisher(app):
  c=CONFIGS[app]
- condition="github.ref == 'refs/heads/main' && github.run_attempt == 1 && vars.SPECOPS_REAL_PUBLICATION == 'enabled-after-acceptance'"
- verify={'if':condition,'runs-on':'ubuntu-24.04','timeout-minutes':20,'permissions':{'contents':'read','actions':'read'},'outputs':{k:'${{ steps.verified.outputs.'+k+' }}' for k in ('digest','artifact_id','artifact_digest')},'steps':[
+ condition="github.ref == 'refs/heads/main' && github.run_attempt == 1 && vars.SPECOPS_REAL_PUBLICATION == 'enabled-after-acceptance' && (github.event_name != 'workflow_run' || (github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.id == 45120213))"
+ verify={'if':condition,'runs-on':'ubuntu-24.04','timeout-minutes':20,'permissions':{'contents':'read','actions':'read'},'outputs':{k:'${{ steps.verified.outputs.'+k+' }}' for k in ('digest','artifact_id','artifact_digest','already_published')},'steps':[
   {'run':'sudo apt-get update -qq && sudo apt-get install -y skopeo'},step(c,'verify',id='verified')]}
  verified={'VERIFIED_DIGEST':'${{ needs.verify.outputs.digest }}','VERIFIED_ARTIFACT_ID':'${{ needs.verify.outputs.artifact_id }}','VERIFIED_ARTIFACT_DIGEST':'${{ needs.verify.outputs.artifact_digest }}'}
- publish={'if':condition,'needs':'verify','runs-on':'ubuntu-24.04','timeout-minutes':20,'permissions':{'contents':'read','actions':'read','packages':'write'},'steps':[
+ publish={'if':condition+" && needs.verify.outputs.already_published != 'true'",'needs':'verify','runs-on':'ubuntu-24.04','timeout-minutes':20,'permissions':{'contents':'read','actions':'read','packages':'write'},'steps':[
   {'run':'sudo apt-get update -qq && sudo apt-get install -y skopeo'},step(c,'fetch',id='input',env=verified),
   {'name':'Login only in copy-only job','env':{'GHCR_TOKEN':'${{ github.token }}'},'run':"set -euo pipefail\numask 077\nprintf '%s' \"$GHCR_TOKEN\" | skopeo login --authfile \"$RUNNER_TEMP/specops-auth.json\" --username \"$GITHUB_ACTOR\" --password-stdin ghcr.io"},
   {'name':'Copy tested OCI without execution or rebuild','id':'copy','env':{'EXPECTED':'${{ needs.verify.outputs.digest }}','OCI_PATH':'${{ steps.input.outputs.oci_path }}'},'run':f'''set -euo pipefail
