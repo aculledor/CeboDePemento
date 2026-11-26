@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import urllib.error
 import urllib.parse
@@ -51,6 +52,23 @@ class ReadAPI(p.API):
         if method!='GET' or body is not None:raise ValueError('read-only-probe')
         return super().request(path,method,body)
 
+
+# Static command phases only; arguments and subprocess output never reach logs.
+ORIGINAL_RUN=p.run
+
+def observed_run(args,raw=False):
+    command='local-command'
+    if args[:2]==['skopeo','copy']:command='registry-copy'
+    elif args[:2]==['skopeo','inspect']:command='registry-inspect' if any(a.startswith('docker://') for a in args) else 'oci-inspect'
+    elif args[:2]==['docker','run']:command='registry-start' if 'registry:2.8.3' in args else 'runtime-start'
+    elif args[:2]==['docker','port']:command='registry-port'
+    elif args[:2]==['docker','pull']:command='runtime-pull'
+    elif args[:2]==['docker','exec']:command='runtime-health'
+    elif args[:3]==['docker','image','inspect']:command='runtime-identity'
+    emit('command',stage=command)
+    return ORIGINAL_RUN(args,raw=raw)
+
+p.run=observed_run
 
 def main():
     if not (os.environ.get('CI')=='true' and os.environ.get('GITHUB_ACTIONS')=='true' and
