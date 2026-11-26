@@ -43,3 +43,40 @@ Pruebas wire públicas no importan código privado; se inyecta Fake API sin toke
 Revisar primero los permisos y el YAML inline, no solo el generador. Después provenance/artifact/OCItest, prepare_promotion/baseline/integrate (pruebas Fake API demuestran una aprobación y merge exacto, sin hacerlos), scope/freeze migraciones y compatibilidad con el parser central. `python3 -m specops_delivery.render cebo .` debe dejar Git limpio en los workflows. Ejecutar Python, TypeScript/API/build/Playwright y CI Docker real; no despachar el publicador real para probarlo.
 
 Rollback de automatización: desactivar flags de preparación/publicación y detener únicamente timers SpecOps propios si hace falta; conservar estado/evidencia root y volúmenes/backups. No reactivar legacy sin nuevo plan de transición y comparación del digest real; un main ordinario no sustituye autorización. No usar down/prune ni borrar datos. El rollback de aplicación pertenece al motor con backup probado y esquema compatible. La retirada de un PR de implementación no cambia NUC ni producción por sí misma.
+
+## Delta de revisión integrada — procedencia después del merge
+
+`producer.py`, `render.py`, `ci.py`, generador de perfiles y scopes son idénticos
+byte a byte a los de servidor-casa #35 corregido. ci.py coincide además con el
+motor #34. Los YAML se regeneran; runtime privilegiado sigue autocontenido.
+
+Publicación y DEV con PR abierto exigen asociación explícita. El reintento de
+integración usa el número del candidato y comprueba identidad/repos/base/autor,
+head SHA, workflow/run/actores/éxito y merged_at. Si necesita revalidar CI de PR
+fusionado con pull_requests vacío, exige created_at/run_started_at y los jobs
+del intento exacto completados antes del merge; updated_at mutable no basta.
+Una asociación explícita contradictoria o evidencia posterior se rechaza.
+
+El cron central valida primero aprobación vigente, documento/digest/recibo,
+identidad del source PR y tree. Fuente ya fusionada con SHA ancestro exacto de
+main termina sin otra mutación ni consultas repetidas de CI histórico. Un fallo
+de respuesta después de fusionar se confirma en el siguiente cron. Los tests de
+Cebo reproducen lista vacía real del run45736465426 y cron repetido sin merges
+adicionales; PR/SHA/repos/actores/workflow/fechas incorrectos fallan cerrado.
+
+En #35, esperar main-source-pending es Retry y no genera failure PROD. Solo un
+rollback real con cuarentena, candidato exacto, imagen anterior coincidente y
+salud confirmada permite publicar failure. La propuesta siguiente espera un
+recibo terminal real, sin adivinar baseline durante integración.
+
+**Riesgo residual SQL:** congelar apps/api/migrations/ no detecta DDL/SQL directo
+en otros módulos. user_version=0 y migration=none no prueban ausencia de cambios
+de esquema. Revisar explícitamente database.ts y escrituras DDL; todo cambio de
+esquema debe declararse y detener publicación hasta acordar compatibilidad y
+restauración con el contrato. No se añade parser ni servicio para fingir cubrir
+ese riesgo. El DEV/TLS aceptado no cambia.
+
+La pausa/enmascarado de actualizadores legacy panel/portal/Cebo y conservación
+del backup diario sigue siendo un gate local obligatorio antes de activar
+SPECOPS_RELEASE_AUTOMATION; aún no comprobado en el NUC. Esta corrección no lo
+activa ni publica candidatos reales. Claude revisa únicamente este delta.

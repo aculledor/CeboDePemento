@@ -1,0 +1,79 @@
+{
+  "source": "https://api.github.com/repos/aculledor/CeboDePemento/actions/runs/45736465426",
+  "run": {
+    "id": 45736465426,
+    "event": "pull_request",
+    "head_sha": "f3b82157ec20c73b192723ef029a0a5204813212",
+    "workflow_id": 400224094,
+    "path": ".github/workflows/ci-ghcr.yml",
+    "status": "completed",
+    "conclusion": "success",
+    "pull_requests": [],
+    "created_at": "2026-11-26T01:32:39Z",
+    "run_started_at": "2026-11-26T01:32:39Z",
+    "updated_at": "2026-11-26T01:36:15Z",
+    "run_attempt": 1,
+    "repository": {
+      "full_name": "aculledor/CeboDePemento"
+    },
+    "head_repository": {
+      "full_name": "aculledor/CeboDePemento"
+    },
+    "actor": {
+      "id": 45120213
+    },
+    "triggering_actor": {
+      "id": 45120213
+    }
+  },
+  "pr": {
+    "number": 2,
+    "state": "closed",
+    "merged": true,
+    "merged_at": "2026-11-26T02:06:18Z",
+    "user": {
+      "id": 45120213
+    },
+    "head": {
+      "sha": "f3b82157ec20c73b192723ef029a0a5204813212",
+      "repo": {
+        "full_name": "aculledor/CeboDePemento"
+      }
+    },
+    "base": {
+      "ref": "main",
+      "repo": {
+        "full_name": "aculledor/CeboDePemento"
+      }
+    }
+  },
+  "jobs": [
+    {
+      "id": 139630800149,
+      "run_id": 45736465426,
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-26T01:32:41Z",
+      "completed_at": "2026-11-26T01:34:14Z"
+    },
+    {
+      "id": 139631373242,
+      "run_id": 45736465426,
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-26T01:34:17Z",
+      "completed_at": "2026-11-26T01:36:15Z"
+    },
+    {
+      "id": 139632104582,
+      "run_id": 45736465426,
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-11-26T01:36:15Z",
+      "completed_at": "2026-11-26T01:36:15Z"
+    }
+  ]
+}

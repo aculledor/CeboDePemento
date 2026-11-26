@@ -20,7 +20,7 @@ for _app, _cfg in CONFIGS.items():
 
 
 def inline(config, mode):
- code=Path(__file__).with_name('producer.py').read_text().replace('CONFIG = {}','CONFIG = '+repr(config))
+ code=Path(__file__).with_name('ci.py').read_text()+'\n'+Path(__file__).with_name('producer.py').read_text().replace('from .ci import ci_association, ci_before_merge, ci_time','').replace('CONFIG = {}','CONFIG = '+repr(config))
  return "python3 - <<'SPECOPS_INLINE'\n"+code+"\nSPECOPS_INLINE"
 
 

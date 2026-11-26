@@ -42,6 +42,61 @@ jobs:
         SPECOPS_MODE: verify
       run: |-
         python3 - <<'SPECOPS_INLINE'
+        """CI/PR binding after GitHub clears run.pull_requests on merge.
+
+        Shared byte-for-byte with candidate producers. No network or mutable timestamps.
+        """
+        from datetime import datetime
+
+
+        def ci_time(value):
+            try:
+                if not isinstance(value, str):
+                    raise ValueError()
+                result = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                if result.utcoffset() is None:
+                    raise ValueError()
+                return result
+            except (TypeError, ValueError):
+                raise ValueError('ci-timestamp') from None
+
+
+        def ci_association(run, pr, expected_pr, allow_merged=False):
+            if type(expected_pr) is not int or type(pr['number']) is not int or pr['number'] != expected_pr:
+                raise ValueError('ci-pr-number')
+            refs = run['pull_requests']
+            if not isinstance(refs, list) or any(type(p.get('number')) is not int for p in refs):
+                raise ValueError('ci-pr-association')
+            numbers = [p['number'] for p in refs]
+            # An explicit contradictory association is never an empty-list fallback.
+            if numbers != [expected_pr] and numbers != []:
+                raise ValueError('ci-pr-association')
+            if pr['state'] == 'open' and not pr.get('merged_at'):
+                if numbers != [expected_pr]:
+                    raise ValueError('ci-pr-association')
+                return False
+            if not allow_merged or pr['state'] != 'closed' or pr.get('merged') is not True:
+                raise ValueError('ci-pr-not-merged')
+            ci_time(pr.get('merged_at'))
+            return True
+
+
+        def ci_before_merge(run, pr, jobs):
+            merged = ci_time(pr.get('merged_at'))
+            created, started = ci_time(run.get('created_at')), ci_time(run.get('run_started_at'))
+            attempt = run.get('run_attempt')
+            if type(attempt) is not int or attempt < 1 or not created <= started <= merged:
+                raise ValueError('ci-after-merge')
+            if not jobs or not any(j.get('conclusion') == 'success' for j in jobs):
+                raise ValueError('ci-jobs-absent')
+            for job in jobs:
+                if (job.get('run_id') != run['id'] or job.get('run_attempt') != attempt or
+                        job.get('status') != 'completed' or job.get('conclusion') not in ('success', 'skipped')):
+                    raise ValueError('ci-job-provenance')
+                first, last = ci_time(job.get('started_at')), ci_time(job.get('completed_at'))
+                if not started <= first <= last <= merged:
+                    raise ValueError('ci-after-merge')
+
         """Self-contained producer: no imports/checkouts of mutable repository code at runtime.
 
         CONFIG is rendered into each audited workflow. All network mutations are GitHub
@@ -63,6 +118,7 @@ jobs:
         import urllib.parse
         import urllib.request
         import zipfile
+
 
         CONFIG = {'app': 'cebo', 'repository': 'aculledor/CeboDePemento', 'image': 'ghcr.io/aculledor/cebo-de-pemento-dev', 'source_path': '.github/workflows/ci-ghcr.yml', 'publisher_path': '.github/workflows/cebo-specops.yml', 'build_artifact': 'specops-cebo-build-v1', 'schema': 0, 'frozen_paths': ['apps/api/migrations/'], 'port': 3001, 'health': '/api/health', 'required_workflows': ['.github/workflows/ci-ghcr.yml'], 'candidate_paths': ['Dockerfile', '.dockerignore', 'package.json', 'package-lock.json', 'tsconfig.base.json', 'apps/', 'packages/', 'catalogo.sqlite', '.github/workflows/ci-ghcr.yml', '.github/workflows/cebo-specops.yml']}
         SHA=re.compile(r'[a-f0-9]{40}\Z')
@@ -147,15 +203,37 @@ jobs:
                 return path
 
 
-        def provenance(api,cfg,run_id,open_only=True):
-            repo='/repos/'+cfg['repository'];run=api.request(repo+f'/actions/runs/{int(run_id)}')
-            require(run['repository']['full_name']==cfg['repository'] and run['head_repository']['full_name']==cfg['repository'] and run['event']=='pull_request' and run['path']==cfg['source_path'],'source-provenance')
+        def source_identity(pr,cfg,number,sha,open_only):
+            require(pr['number']==number and type(pr['number']) is int,'source-pr-number')
+            require(pr['head']['repo'] is not None and pr['head']['repo']['full_name']==cfg['repository'] and pr['base']['repo']['full_name']==cfg['repository'] and pr['base']['ref']=='main' and pr['user']['id']==OWNER,'source-pr')
+            require(pr['head']['sha']==sha,'source-obsolete')
+            if pr['state']=='open':
+                require(not pr.get('merged_at'),'source-pr-state')
+            else:
+                require(not open_only and pr['state']=='closed' and pr.get('merged') is True,'source-pr-not-merged')
+                ci_time(pr.get('merged_at'))
+
+
+        def check_ci(api,cfg,run,pr,number,workflow_id,path,open_only):
+            require(run['repository']['full_name']==cfg['repository'] and run['head_repository']['full_name']==cfg['repository'] and run['event']=='pull_request' and run['workflow_id']==workflow_id and run['path']==path and run['head_sha']==pr['head']['sha'],'source-provenance')
             require(run['actor']['id']==OWNER and run['triggering_actor']['id']==OWNER,'source-actor')
             require(run['status']=='completed' and run['conclusion']=='success' and SHA.fullmatch(run['head_sha']),'source-ci')
-            require(len(run['pull_requests'])==1,'source-pr-association')
-            pr=api.request(repo+f'/pulls/{run["pull_requests"][0]["number"]}')
-            require(pr['head']['repo']['full_name']==cfg['repository'] and pr['base']['repo']['full_name']==cfg['repository'] and pr['base']['ref']=='main' and pr['user']['id']==OWNER,'source-pr')
-            require(pr['head']['sha']==run['head_sha'] and (pr['state']=='open' or (not open_only and pr.get('merged_at'))),'source-obsolete')
+            source_identity(pr,cfg,number,run['head_sha'],open_only)
+            if ci_association(run,pr,number,allow_merged=not open_only):
+                jobs=api.pages('/repos/'+cfg['repository']+f'/actions/runs/{run["id"]}/attempts/{run["run_attempt"]}/jobs','jobs')
+                ci_before_merge(run,pr,jobs)
+
+
+        def provenance(api,cfg,run_id,open_only=True,pr_number=None):
+            repo='/repos/'+cfg['repository'];run=api.request(repo+f'/actions/runs/{int(run_id)}')
+            require(run['id']==int(run_id),'source-run-id')
+            if pr_number is None:
+                require(open_only and len(run['pull_requests'])==1,'source-pr-association')
+                pr_number=run['pull_requests'][0]['number']
+            require(type(pr_number) is int and pr_number>0,'source-pr-number')
+            pr=api.request(repo+f'/pulls/{pr_number}')
+            workflow=api.request(repo+'/actions/workflows/'+cfg['source_path'].rsplit('/',1)[-1])
+            check_ci(api,cfg,run,pr,pr_number,workflow['id'],cfg['source_path'],open_only)
             files=api.pages(repo+f'/pulls/{pr["number"]}/files')
             require(not any(path==scope or scope.endswith('/') and path.startswith(scope) for f in files for path in (f.get('filename',''),f.get('previous_filename','')) for scope in cfg.get('frozen_paths',[])),'migration-not-supported-v1')
             require(any(path==scope or scope.endswith('/') and path.startswith(scope) for f in files for path in (f.get('filename',''),f.get('previous_filename','')) for scope in cfg['candidate_paths']),'source-outside-scope')
@@ -346,7 +424,7 @@ jobs:
         def integrate(api,cfg,number):
             control='/repos/'+CONTROL;pr=api.request(control+f'/pulls/{int(number)}')
             target='specops-promotions/'+cfg['app']
-            require(pr['merged'] and pr['merged_by']['id']==OWNER and pr['base']['ref']==target and pr['head']['repo']['full_name']==CONTROL,'promotion-admin-gate')
+            require(pr['number']==int(number) and pr['merged'] and pr['merged_by']['id']==OWNER and pr['base']['ref']==target and pr['head']['repo']['full_name']==CONTROL,'promotion-admin-gate')
             require(api.request(control+'/branches/'+urllib.parse.quote(target,safe=''))['commit']['sha']==pr['merge_commit_sha'],'promotion-revoked')
             files=api.pages(control+f'/pulls/{int(number)}/files');path='releases/'+cfg['app']+'.json'
             require(len(files)==1 and files[0]['filename']==path and files[0]['status'] in ('added','modified'),'promotion-files')
@@ -359,11 +437,23 @@ jobs:
             c=candidate(doc['candidate'],cfg);require(identity(c)==doc['candidate_id'],'promotion-candidate')
             rows=statuses(api,cfg['repository'],c['sha'],'specops/dev/'+cfg['app'])
             require(rows and rows[0]['state']=='success' and rows[0]['description']==doc['candidate_id']+':'+doc['dev_receipt'],'promotion-dev-receipt')
-            provenance(api,cfg,c['source_run'],open_only=False)
+            source=api.request('/repos/'+cfg['repository']+f'/pulls/{c["pr"]}')
+            source_identity(source,cfg,c['pr'],c['sha'],open_only=False)
+            if source.get('merged_at'):
+                # No new mutation: still bind exact approval/document/receipt, source
+                # identity/tree and ancestry before skipping already completed work.
+                tree=api.request('/repos/'+cfg['repository']+'/git/commits/'+c['sha'])['tree']['sha']
+                require(tree==c['tree'],'source-tree')
+                comparison=api.request('/repos/'+cfg['repository']+'/compare/'+c['sha']+'...main')
+                require(comparison['status'] in ('ahead','identical') and comparison['merge_base_commit']['sha']==c['sha'],'main-source-not-integrated')
+                return c
+            meta=provenance(api,cfg,c['source_run'],open_only=False,pr_number=c['pr'])
+            require(meta=={k:c[k] for k in ('sha','tree','pr','source_run')},'source-candidate-mismatch')
             for path in cfg['required_workflows']:
                 workflow=api.request('/repos/'+cfg['repository']+'/actions/workflows/'+path.rsplit('/',1)[-1])
                 runs=api.pages('/repos/'+cfg['repository']+f'/actions/workflows/{workflow["id"]}/runs?head_sha={c["sha"]}&event=pull_request','workflow_runs')
-                require(runs and max(runs,key=lambda r:r['id'])['conclusion']=='success','required-ci')
+                require(bool(runs),'required-ci')
+                check_ci(api,cfg,max(runs,key=lambda r:r['id']),source,c['pr'],workflow['id'],path,open_only=False)
             source=api.request('/repos/'+cfg['repository']+f'/pulls/{c["pr"]}')
             if not source.get('merged_at'):
                 if source.get('draft'):
@@ -372,6 +462,14 @@ jobs:
             comparison=api.request('/repos/'+cfg['repository']+'/compare/'+c['sha']+'...main')
             require(comparison['status'] in ('ahead','identical') and comparison['merge_base_commit']['sha']==c['sha'],'main-source-not-integrated')
             return c
+
+
+        def integrate_periodic(api,configs):
+            for app,config in configs.items():
+                target='specops-promotions/'+app
+                proposals=api.pages('/repos/'+CONTROL+'/pulls?state=closed&base='+urllib.parse.quote(target,safe=''))
+                merged=next((pr for pr in proposals if pr.get('merged_at')),None)
+                if merged:integrate(api,config,merged['number'])
 
 
         def output(values):
@@ -424,12 +522,7 @@ jobs:
                     integrate(api,cfg[app],event['pull_request']['number'])
                 else:
                     require(os.environ['GITHUB_REF']=='refs/heads/main','trusted-integration-retry')
-                    for app,config in cfg.items():
-                        target='specops-promotions/'+app
-                        # Branches exist only after the one-time reviewed bootstrap.
-                        proposals=api.pages('/repos/'+CONTROL+'/pulls?state=closed&base='+urllib.parse.quote(target,safe=''))
-                        merged=next((pr for pr in proposals if pr.get('merged_at')),None)
-                        if merged:integrate(api,config,merged['number'])
+                    integrate_periodic(api,cfg)
             else:raise ValueError('producer-mode')
 
 
@@ -465,6 +558,61 @@ jobs:
         VERIFIED_ARTIFACT_DIGEST: ${{ needs.verify.outputs.artifact_digest }}
       run: |-
         python3 - <<'SPECOPS_INLINE'
+        """CI/PR binding after GitHub clears run.pull_requests on merge.
+
+        Shared byte-for-byte with candidate producers. No network or mutable timestamps.
+        """
+        from datetime import datetime
+
+
+        def ci_time(value):
+            try:
+                if not isinstance(value, str):
+                    raise ValueError()
+                result = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                if result.utcoffset() is None:
+                    raise ValueError()
+                return result
+            except (TypeError, ValueError):
+                raise ValueError('ci-timestamp') from None
+
+
+        def ci_association(run, pr, expected_pr, allow_merged=False):
+            if type(expected_pr) is not int or type(pr['number']) is not int or pr['number'] != expected_pr:
+                raise ValueError('ci-pr-number')
+            refs = run['pull_requests']
+            if not isinstance(refs, list) or any(type(p.get('number')) is not int for p in refs):
+                raise ValueError('ci-pr-association')
+            numbers = [p['number'] for p in refs]
+            # An explicit contradictory association is never an empty-list fallback.
+            if numbers != [expected_pr] and numbers != []:
+                raise ValueError('ci-pr-association')
+            if pr['state'] == 'open' and not pr.get('merged_at'):
+                if numbers != [expected_pr]:
+                    raise ValueError('ci-pr-association')
+                return False
+            if not allow_merged or pr['state'] != 'closed' or pr.get('merged') is not True:
+                raise ValueError('ci-pr-not-merged')
+            ci_time(pr.get('merged_at'))
+            return True
+
+
+        def ci_before_merge(run, pr, jobs):
+            merged = ci_time(pr.get('merged_at'))
+            created, started = ci_time(run.get('created_at')), ci_time(run.get('run_started_at'))
+            attempt = run.get('run_attempt')
+            if type(attempt) is not int or attempt < 1 or not created <= started <= merged:
+                raise ValueError('ci-after-merge')
+            if not jobs or not any(j.get('conclusion') == 'success' for j in jobs):
+                raise ValueError('ci-jobs-absent')
+            for job in jobs:
+                if (job.get('run_id') != run['id'] or job.get('run_attempt') != attempt or
+                        job.get('status') != 'completed' or job.get('conclusion') not in ('success', 'skipped')):
+                    raise ValueError('ci-job-provenance')
+                first, last = ci_time(job.get('started_at')), ci_time(job.get('completed_at'))
+                if not started <= first <= last <= merged:
+                    raise ValueError('ci-after-merge')
+
         """Self-contained producer: no imports/checkouts of mutable repository code at runtime.
 
         CONFIG is rendered into each audited workflow. All network mutations are GitHub
@@ -486,6 +634,7 @@ jobs:
         import urllib.parse
         import urllib.request
         import zipfile
+
 
         CONFIG = {'app': 'cebo', 'repository': 'aculledor/CeboDePemento', 'image': 'ghcr.io/aculledor/cebo-de-pemento-dev', 'source_path': '.github/workflows/ci-ghcr.yml', 'publisher_path': '.github/workflows/cebo-specops.yml', 'build_artifact': 'specops-cebo-build-v1', 'schema': 0, 'frozen_paths': ['apps/api/migrations/'], 'port': 3001, 'health': '/api/health', 'required_workflows': ['.github/workflows/ci-ghcr.yml'], 'candidate_paths': ['Dockerfile', '.dockerignore', 'package.json', 'package-lock.json', 'tsconfig.base.json', 'apps/', 'packages/', 'catalogo.sqlite', '.github/workflows/ci-ghcr.yml', '.github/workflows/cebo-specops.yml']}
         SHA=re.compile(r'[a-f0-9]{40}\Z')
@@ -570,15 +719,37 @@ jobs:
                 return path
 
 
-        def provenance(api,cfg,run_id,open_only=True):
-            repo='/repos/'+cfg['repository'];run=api.request(repo+f'/actions/runs/{int(run_id)}')
-            require(run['repository']['full_name']==cfg['repository'] and run['head_repository']['full_name']==cfg['repository'] and run['event']=='pull_request' and run['path']==cfg['source_path'],'source-provenance')
+        def source_identity(pr,cfg,number,sha,open_only):
+            require(pr['number']==number and type(pr['number']) is int,'source-pr-number')
+            require(pr['head']['repo'] is not None and pr['head']['repo']['full_name']==cfg['repository'] and pr['base']['repo']['full_name']==cfg['repository'] and pr['base']['ref']=='main' and pr['user']['id']==OWNER,'source-pr')
+            require(pr['head']['sha']==sha,'source-obsolete')
+            if pr['state']=='open':
+                require(not pr.get('merged_at'),'source-pr-state')
+            else:
+                require(not open_only and pr['state']=='closed' and pr.get('merged') is True,'source-pr-not-merged')
+                ci_time(pr.get('merged_at'))
+
+
+        def check_ci(api,cfg,run,pr,number,workflow_id,path,open_only):
+            require(run['repository']['full_name']==cfg['repository'] and run['head_repository']['full_name']==cfg['repository'] and run['event']=='pull_request' and run['workflow_id']==workflow_id and run['path']==path and run['head_sha']==pr['head']['sha'],'source-provenance')
             require(run['actor']['id']==OWNER and run['triggering_actor']['id']==OWNER,'source-actor')
             require(run['status']=='completed' and run['conclusion']=='success' and SHA.fullmatch(run['head_sha']),'source-ci')
-            require(len(run['pull_requests'])==1,'source-pr-association')
-            pr=api.request(repo+f'/pulls/{run["pull_requests"][0]["number"]}')
-            require(pr['head']['repo']['full_name']==cfg['repository'] and pr['base']['repo']['full_name']==cfg['repository'] and pr['base']['ref']=='main' and pr['user']['id']==OWNER,'source-pr')
-            require(pr['head']['sha']==run['head_sha'] and (pr['state']=='open' or (not open_only and pr.get('merged_at'))),'source-obsolete')
+            source_identity(pr,cfg,number,run['head_sha'],open_only)
+            if ci_association(run,pr,number,allow_merged=not open_only):
+                jobs=api.pages('/repos/'+cfg['repository']+f'/actions/runs/{run["id"]}/attempts/{run["run_attempt"]}/jobs','jobs')
+                ci_before_merge(run,pr,jobs)
+
+
+        def provenance(api,cfg,run_id,open_only=True,pr_number=None):
+            repo='/repos/'+cfg['repository'];run=api.request(repo+f'/actions/runs/{int(run_id)}')
+            require(run['id']==int(run_id),'source-run-id')
+            if pr_number is None:
+                require(open_only and len(run['pull_requests'])==1,'source-pr-association')
+                pr_number=run['pull_requests'][0]['number']
+            require(type(pr_number) is int and pr_number>0,'source-pr-number')
+            pr=api.request(repo+f'/pulls/{pr_number}')
+            workflow=api.request(repo+'/actions/workflows/'+cfg['source_path'].rsplit('/',1)[-1])
+            check_ci(api,cfg,run,pr,pr_number,workflow['id'],cfg['source_path'],open_only)
             files=api.pages(repo+f'/pulls/{pr["number"]}/files')
             require(not any(path==scope or scope.endswith('/') and path.startswith(scope) for f in files for path in (f.get('filename',''),f.get('previous_filename','')) for scope in cfg.get('frozen_paths',[])),'migration-not-supported-v1')
             require(any(path==scope or scope.endswith('/') and path.startswith(scope) for f in files for path in (f.get('filename',''),f.get('previous_filename','')) for scope in cfg['candidate_paths']),'source-outside-scope')
@@ -769,7 +940,7 @@ jobs:
         def integrate(api,cfg,number):
             control='/repos/'+CONTROL;pr=api.request(control+f'/pulls/{int(number)}')
             target='specops-promotions/'+cfg['app']
-            require(pr['merged'] and pr['merged_by']['id']==OWNER and pr['base']['ref']==target and pr['head']['repo']['full_name']==CONTROL,'promotion-admin-gate')
+            require(pr['number']==int(number) and pr['merged'] and pr['merged_by']['id']==OWNER and pr['base']['ref']==target and pr['head']['repo']['full_name']==CONTROL,'promotion-admin-gate')
             require(api.request(control+'/branches/'+urllib.parse.quote(target,safe=''))['commit']['sha']==pr['merge_commit_sha'],'promotion-revoked')
             files=api.pages(control+f'/pulls/{int(number)}/files');path='releases/'+cfg['app']+'.json'
             require(len(files)==1 and files[0]['filename']==path and files[0]['status'] in ('added','modified'),'promotion-files')
@@ -782,11 +953,23 @@ jobs:
             c=candidate(doc['candidate'],cfg);require(identity(c)==doc['candidate_id'],'promotion-candidate')
             rows=statuses(api,cfg['repository'],c['sha'],'specops/dev/'+cfg['app'])
             require(rows and rows[0]['state']=='success' and rows[0]['description']==doc['candidate_id']+':'+doc['dev_receipt'],'promotion-dev-receipt')
-            provenance(api,cfg,c['source_run'],open_only=False)
+            source=api.request('/repos/'+cfg['repository']+f'/pulls/{c["pr"]}')
+            source_identity(source,cfg,c['pr'],c['sha'],open_only=False)
+            if source.get('merged_at'):
+                # No new mutation: still bind exact approval/document/receipt, source
+                # identity/tree and ancestry before skipping already completed work.
+                tree=api.request('/repos/'+cfg['repository']+'/git/commits/'+c['sha'])['tree']['sha']
+                require(tree==c['tree'],'source-tree')
+                comparison=api.request('/repos/'+cfg['repository']+'/compare/'+c['sha']+'...main')
+                require(comparison['status'] in ('ahead','identical') and comparison['merge_base_commit']['sha']==c['sha'],'main-source-not-integrated')
+                return c
+            meta=provenance(api,cfg,c['source_run'],open_only=False,pr_number=c['pr'])
+            require(meta=={k:c[k] for k in ('sha','tree','pr','source_run')},'source-candidate-mismatch')
             for path in cfg['required_workflows']:
                 workflow=api.request('/repos/'+cfg['repository']+'/actions/workflows/'+path.rsplit('/',1)[-1])
                 runs=api.pages('/repos/'+cfg['repository']+f'/actions/workflows/{workflow["id"]}/runs?head_sha={c["sha"]}&event=pull_request','workflow_runs')
-                require(runs and max(runs,key=lambda r:r['id'])['conclusion']=='success','required-ci')
+                require(bool(runs),'required-ci')
+                check_ci(api,cfg,max(runs,key=lambda r:r['id']),source,c['pr'],workflow['id'],path,open_only=False)
             source=api.request('/repos/'+cfg['repository']+f'/pulls/{c["pr"]}')
             if not source.get('merged_at'):
                 if source.get('draft'):
@@ -795,6 +978,14 @@ jobs:
             comparison=api.request('/repos/'+cfg['repository']+'/compare/'+c['sha']+'...main')
             require(comparison['status'] in ('ahead','identical') and comparison['merge_base_commit']['sha']==c['sha'],'main-source-not-integrated')
             return c
+
+
+        def integrate_periodic(api,configs):
+            for app,config in configs.items():
+                target='specops-promotions/'+app
+                proposals=api.pages('/repos/'+CONTROL+'/pulls?state=closed&base='+urllib.parse.quote(target,safe=''))
+                merged=next((pr for pr in proposals if pr.get('merged_at')),None)
+                if merged:integrate(api,config,merged['number'])
 
 
         def output(values):
@@ -847,12 +1038,7 @@ jobs:
                     integrate(api,cfg[app],event['pull_request']['number'])
                 else:
                     require(os.environ['GITHUB_REF']=='refs/heads/main','trusted-integration-retry')
-                    for app,config in cfg.items():
-                        target='specops-promotions/'+app
-                        # Branches exist only after the one-time reviewed bootstrap.
-                        proposals=api.pages('/repos/'+CONTROL+'/pulls?state=closed&base='+urllib.parse.quote(target,safe=''))
-                        merged=next((pr for pr in proposals if pr.get('merged_at')),None)
-                        if merged:integrate(api,config,merged['number'])
+                    integrate_periodic(api,cfg)
             else:raise ValueError('producer-mode')
 
 
@@ -895,6 +1081,61 @@ jobs:
         REMOTE_DIGEST: ${{ steps.copy.outputs.digest }}
       run: |-
         python3 - <<'SPECOPS_INLINE'
+        """CI/PR binding after GitHub clears run.pull_requests on merge.
+
+        Shared byte-for-byte with candidate producers. No network or mutable timestamps.
+        """
+        from datetime import datetime
+
+
+        def ci_time(value):
+            try:
+                if not isinstance(value, str):
+                    raise ValueError()
+                result = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                if result.utcoffset() is None:
+                    raise ValueError()
+                return result
+            except (TypeError, ValueError):
+                raise ValueError('ci-timestamp') from None
+
+
+        def ci_association(run, pr, expected_pr, allow_merged=False):
+            if type(expected_pr) is not int or type(pr['number']) is not int or pr['number'] != expected_pr:
+                raise ValueError('ci-pr-number')
+            refs = run['pull_requests']
+            if not isinstance(refs, list) or any(type(p.get('number')) is not int for p in refs):
+                raise ValueError('ci-pr-association')
+            numbers = [p['number'] for p in refs]
+            # An explicit contradictory association is never an empty-list fallback.
+            if numbers != [expected_pr] and numbers != []:
+                raise ValueError('ci-pr-association')
+            if pr['state'] == 'open' and not pr.get('merged_at'):
+                if numbers != [expected_pr]:
+                    raise ValueError('ci-pr-association')
+                return False
+            if not allow_merged or pr['state'] != 'closed' or pr.get('merged') is not True:
+                raise ValueError('ci-pr-not-merged')
+            ci_time(pr.get('merged_at'))
+            return True
+
+
+        def ci_before_merge(run, pr, jobs):
+            merged = ci_time(pr.get('merged_at'))
+            created, started = ci_time(run.get('created_at')), ci_time(run.get('run_started_at'))
+            attempt = run.get('run_attempt')
+            if type(attempt) is not int or attempt < 1 or not created <= started <= merged:
+                raise ValueError('ci-after-merge')
+            if not jobs or not any(j.get('conclusion') == 'success' for j in jobs):
+                raise ValueError('ci-jobs-absent')
+            for job in jobs:
+                if (job.get('run_id') != run['id'] or job.get('run_attempt') != attempt or
+                        job.get('status') != 'completed' or job.get('conclusion') not in ('success', 'skipped')):
+                    raise ValueError('ci-job-provenance')
+                first, last = ci_time(job.get('started_at')), ci_time(job.get('completed_at'))
+                if not started <= first <= last <= merged:
+                    raise ValueError('ci-after-merge')
+
         """Self-contained producer: no imports/checkouts of mutable repository code at runtime.
 
         CONFIG is rendered into each audited workflow. All network mutations are GitHub
@@ -916,6 +1157,7 @@ jobs:
         import urllib.parse
         import urllib.request
         import zipfile
+
 
         CONFIG = {'app': 'cebo', 'repository': 'aculledor/CeboDePemento', 'image': 'ghcr.io/aculledor/cebo-de-pemento-dev', 'source_path': '.github/workflows/ci-ghcr.yml', 'publisher_path': '.github/workflows/cebo-specops.yml', 'build_artifact': 'specops-cebo-build-v1', 'schema': 0, 'frozen_paths': ['apps/api/migrations/'], 'port': 3001, 'health': '/api/health', 'required_workflows': ['.github/workflows/ci-ghcr.yml'], 'candidate_paths': ['Dockerfile', '.dockerignore', 'package.json', 'package-lock.json', 'tsconfig.base.json', 'apps/', 'packages/', 'catalogo.sqlite', '.github/workflows/ci-ghcr.yml', '.github/workflows/cebo-specops.yml']}
         SHA=re.compile(r'[a-f0-9]{40}\Z')
@@ -1000,15 +1242,37 @@ jobs:
                 return path
 
 
-        def provenance(api,cfg,run_id,open_only=True):
-            repo='/repos/'+cfg['repository'];run=api.request(repo+f'/actions/runs/{int(run_id)}')
-            require(run['repository']['full_name']==cfg['repository'] and run['head_repository']['full_name']==cfg['repository'] and run['event']=='pull_request' and run['path']==cfg['source_path'],'source-provenance')
+        def source_identity(pr,cfg,number,sha,open_only):
+            require(pr['number']==number and type(pr['number']) is int,'source-pr-number')
+            require(pr['head']['repo'] is not None and pr['head']['repo']['full_name']==cfg['repository'] and pr['base']['repo']['full_name']==cfg['repository'] and pr['base']['ref']=='main' and pr['user']['id']==OWNER,'source-pr')
+            require(pr['head']['sha']==sha,'source-obsolete')
+            if pr['state']=='open':
+                require(not pr.get('merged_at'),'source-pr-state')
+            else:
+                require(not open_only and pr['state']=='closed' and pr.get('merged') is True,'source-pr-not-merged')
+                ci_time(pr.get('merged_at'))
+
+
+        def check_ci(api,cfg,run,pr,number,workflow_id,path,open_only):
+            require(run['repository']['full_name']==cfg['repository'] and run['head_repository']['full_name']==cfg['repository'] and run['event']=='pull_request' and run['workflow_id']==workflow_id and run['path']==path and run['head_sha']==pr['head']['sha'],'source-provenance')
             require(run['actor']['id']==OWNER and run['triggering_actor']['id']==OWNER,'source-actor')
             require(run['status']=='completed' and run['conclusion']=='success' and SHA.fullmatch(run['head_sha']),'source-ci')
-            require(len(run['pull_requests'])==1,'source-pr-association')
-            pr=api.request(repo+f'/pulls/{run["pull_requests"][0]["number"]}')
-            require(pr['head']['repo']['full_name']==cfg['repository'] and pr['base']['repo']['full_name']==cfg['repository'] and pr['base']['ref']=='main' and pr['user']['id']==OWNER,'source-pr')
-            require(pr['head']['sha']==run['head_sha'] and (pr['state']=='open' or (not open_only and pr.get('merged_at'))),'source-obsolete')
+            source_identity(pr,cfg,number,run['head_sha'],open_only)
+            if ci_association(run,pr,number,allow_merged=not open_only):
+                jobs=api.pages('/repos/'+cfg['repository']+f'/actions/runs/{run["id"]}/attempts/{run["run_attempt"]}/jobs','jobs')
+                ci_before_merge(run,pr,jobs)
+
+
+        def provenance(api,cfg,run_id,open_only=True,pr_number=None):
+            repo='/repos/'+cfg['repository'];run=api.request(repo+f'/actions/runs/{int(run_id)}')
+            require(run['id']==int(run_id),'source-run-id')
+            if pr_number is None:
+                require(open_only and len(run['pull_requests'])==1,'source-pr-association')
+                pr_number=run['pull_requests'][0]['number']
+            require(type(pr_number) is int and pr_number>0,'source-pr-number')
+            pr=api.request(repo+f'/pulls/{pr_number}')
+            workflow=api.request(repo+'/actions/workflows/'+cfg['source_path'].rsplit('/',1)[-1])
+            check_ci(api,cfg,run,pr,pr_number,workflow['id'],cfg['source_path'],open_only)
             files=api.pages(repo+f'/pulls/{pr["number"]}/files')
             require(not any(path==scope or scope.endswith('/') and path.startswith(scope) for f in files for path in (f.get('filename',''),f.get('previous_filename','')) for scope in cfg.get('frozen_paths',[])),'migration-not-supported-v1')
             require(any(path==scope or scope.endswith('/') and path.startswith(scope) for f in files for path in (f.get('filename',''),f.get('previous_filename','')) for scope in cfg['candidate_paths']),'source-outside-scope')
@@ -1199,7 +1463,7 @@ jobs:
         def integrate(api,cfg,number):
             control='/repos/'+CONTROL;pr=api.request(control+f'/pulls/{int(number)}')
             target='specops-promotions/'+cfg['app']
-            require(pr['merged'] and pr['merged_by']['id']==OWNER and pr['base']['ref']==target and pr['head']['repo']['full_name']==CONTROL,'promotion-admin-gate')
+            require(pr['number']==int(number) and pr['merged'] and pr['merged_by']['id']==OWNER and pr['base']['ref']==target and pr['head']['repo']['full_name']==CONTROL,'promotion-admin-gate')
             require(api.request(control+'/branches/'+urllib.parse.quote(target,safe=''))['commit']['sha']==pr['merge_commit_sha'],'promotion-revoked')
             files=api.pages(control+f'/pulls/{int(number)}/files');path='releases/'+cfg['app']+'.json'
             require(len(files)==1 and files[0]['filename']==path and files[0]['status'] in ('added','modified'),'promotion-files')
@@ -1212,11 +1476,23 @@ jobs:
             c=candidate(doc['candidate'],cfg);require(identity(c)==doc['candidate_id'],'promotion-candidate')
             rows=statuses(api,cfg['repository'],c['sha'],'specops/dev/'+cfg['app'])
             require(rows and rows[0]['state']=='success' and rows[0]['description']==doc['candidate_id']+':'+doc['dev_receipt'],'promotion-dev-receipt')
-            provenance(api,cfg,c['source_run'],open_only=False)
+            source=api.request('/repos/'+cfg['repository']+f'/pulls/{c["pr"]}')
+            source_identity(source,cfg,c['pr'],c['sha'],open_only=False)
+            if source.get('merged_at'):
+                # No new mutation: still bind exact approval/document/receipt, source
+                # identity/tree and ancestry before skipping already completed work.
+                tree=api.request('/repos/'+cfg['repository']+'/git/commits/'+c['sha'])['tree']['sha']
+                require(tree==c['tree'],'source-tree')
+                comparison=api.request('/repos/'+cfg['repository']+'/compare/'+c['sha']+'...main')
+                require(comparison['status'] in ('ahead','identical') and comparison['merge_base_commit']['sha']==c['sha'],'main-source-not-integrated')
+                return c
+            meta=provenance(api,cfg,c['source_run'],open_only=False,pr_number=c['pr'])
+            require(meta=={k:c[k] for k in ('sha','tree','pr','source_run')},'source-candidate-mismatch')
             for path in cfg['required_workflows']:
                 workflow=api.request('/repos/'+cfg['repository']+'/actions/workflows/'+path.rsplit('/',1)[-1])
                 runs=api.pages('/repos/'+cfg['repository']+f'/actions/workflows/{workflow["id"]}/runs?head_sha={c["sha"]}&event=pull_request','workflow_runs')
-                require(runs and max(runs,key=lambda r:r['id'])['conclusion']=='success','required-ci')
+                require(bool(runs),'required-ci')
+                check_ci(api,cfg,max(runs,key=lambda r:r['id']),source,c['pr'],workflow['id'],path,open_only=False)
             source=api.request('/repos/'+cfg['repository']+f'/pulls/{c["pr"]}')
             if not source.get('merged_at'):
                 if source.get('draft'):
@@ -1225,6 +1501,14 @@ jobs:
             comparison=api.request('/repos/'+cfg['repository']+'/compare/'+c['sha']+'...main')
             require(comparison['status'] in ('ahead','identical') and comparison['merge_base_commit']['sha']==c['sha'],'main-source-not-integrated')
             return c
+
+
+        def integrate_periodic(api,configs):
+            for app,config in configs.items():
+                target='specops-promotions/'+app
+                proposals=api.pages('/repos/'+CONTROL+'/pulls?state=closed&base='+urllib.parse.quote(target,safe=''))
+                merged=next((pr for pr in proposals if pr.get('merged_at')),None)
+                if merged:integrate(api,config,merged['number'])
 
 
         def output(values):
@@ -1277,12 +1561,7 @@ jobs:
                     integrate(api,cfg[app],event['pull_request']['number'])
                 else:
                     require(os.environ['GITHUB_REF']=='refs/heads/main','trusted-integration-retry')
-                    for app,config in cfg.items():
-                        target='specops-promotions/'+app
-                        # Branches exist only after the one-time reviewed bootstrap.
-                        proposals=api.pages('/repos/'+CONTROL+'/pulls?state=closed&base='+urllib.parse.quote(target,safe=''))
-                        merged=next((pr for pr in proposals if pr.get('merged_at')),None)
-                        if merged:integrate(api,config,merged['number'])
+                    integrate_periodic(api,cfg)
             else:raise ValueError('producer-mode')
 
 

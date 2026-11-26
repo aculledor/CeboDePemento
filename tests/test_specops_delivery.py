@@ -4,6 +4,7 @@ import copy
 from dataclasses import asdict
 import io
 import json
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -27,15 +28,19 @@ class Fake:
  def __init__(self):
   self.mutations=[];self.files=[{'filename':next(s for s in CFG['candidate_paths'] if s.endswith('/'))+'server.ts'}]
   self.source={'number':7,'draft':True,'node_id':'SOURCE_FIXTURE','state':'open','head':{'sha':SHA,'repo':{'full_name':CFG['repository']}},'base':{'ref':'main','repo':{'full_name':CFG['repository']}},'user':{'id':p.OWNER}}
-  self.run={'id':100,'workflow_id':10,'repository':{'full_name':CFG['repository']},'head_repository':{'full_name':CFG['repository']},'head_sha':SHA,'path':CFG['source_path'],'event':'pull_request','actor':{'id':p.OWNER},'triggering_actor':{'id':p.OWNER},'status':'completed','conclusion':'success','pull_requests':[{'number':7}]}
+  self.run={'id':100,'workflow_id':10,'repository':{'full_name':CFG['repository']},'head_repository':{'full_name':CFG['repository']},'head_sha':SHA,'path':CFG['source_path'],'event':'pull_request','actor':{'id':p.OWNER},'triggering_actor':{'id':p.OWNER},'status':'completed','conclusion':'success','pull_requests':[{'number':7}],'run_attempt':1,'created_at':'2026-11-26T01:32:39Z','run_started_at':'2026-11-26T01:32:39Z'}
   self.latest=100;self.c=value();self.old=CFG['image'].removesuffix('-dev')+'@sha256:'+'d'*64
   self.doc={'version':1,'app':APP,'candidate':self.c,'candidate_id':p.identity(self.c),'previous_image':self.old,'dev_receipt':'e'*64,'promotion_pr':9}
-  self.promotion={'number':9,'merged':True,'merged_by':{'id':p.OWNER},'base':{'ref':'specops-promotions/'+APP},'head':{'repo':{'full_name':p.CONTROL},'sha':'f'*40},'merge_commit_sha':'f'*40}
+  self.promotion={'number':9,'merged':True,'merged_at':'2026-11-26T02:06:18Z','merged_by':{'id':p.OWNER},'base':{'ref':'specops-promotions/'+APP},'head':{'repo':{'full_name':p.CONTROL},'sha':'f'*40},'merge_commit_sha':'f'*40}
   self.prod=[]
  def request(self,path,method='GET',body=None):
-  if method!='GET':self.mutations.append((path,method,body));return {'merged':True}
+  if method!='GET':
+   self.mutations.append((path,method,body))
+   if path.endswith('/pulls/7/merge'):
+    self.source.update(state='closed',merged=True,merged_at='2026-11-26T02:06:18Z',draft=False);self.run['pull_requests']=[]
+   return {'merged':True}
   if '/actions/runs/' in path:return self.run
-  if '/actions/workflows/' in path:return {'id':10}
+  if '/actions/workflows/' in path:return {'id':10+CFG['required_workflows'].index('.github/workflows/'+path.rsplit('/',1)[-1])}
   if '/git/commits/' in path:return {'tree':{'sha':TREE}}
   if '/pulls/7' in path:return self.source
   if '/pulls/9' in path:return self.promotion
@@ -44,9 +49,15 @@ class Fake:
   if '/compare/' in path:return {'status':'ahead','merge_base_commit':{'sha':SHA}}
   raise AssertionError(path)
  def pages(self,path,key=None):
+  if '/pulls?state=closed&base=' in path:return [self.promotion]
   if '/pulls/9/files' in path:return [{'filename':'releases/'+APP+'.json','status':'modified'}]
   if '/pulls/7/files' in path:return self.files
-  if '/runs?' in path:return [dict(self.run,id=self.latest)]
+  if '/attempts/' in path:
+   number=int(path.split('/actions/runs/')[1].split('/')[0])
+   return [{'run_id':number,'run_attempt':1,'status':'completed','conclusion':'success','started_at':'2026-11-26T01:32:41Z','completed_at':'2026-11-26T01:36:15Z'}]
+  if '/runs?' in path:
+   workflow=int(re.search(r'/workflows/(\d+)/',path)[1]);idx=workflow-10
+   return [dict(self.run,id=self.latest+idx,workflow_id=workflow,path=CFG['required_workflows'][idx])]
   if '/statuses' in path:return self.prod if self.prod else [{'context':'specops/dev/'+APP,'state':'success','description':self.doc['candidate_id']+':'+self.doc['dev_receipt']}]
   raise AssertionError(path)
 
@@ -114,7 +125,7 @@ class Delivery(unittest.TestCase):
   api=Fake();self.assertEqual(p.integrate(api,CFG,9),api.c)
   self.assertEqual(len(api.mutations),2);self.assertEqual(api.mutations[0][0],'/graphql');self.assertEqual(api.mutations[0][2]['variables']['id'],'SOURCE_FIXTURE');path,method,body=api.mutations[1]
   self.assertTrue(path.endswith('/pulls/7/merge'));self.assertEqual(method,'PUT');self.assertEqual(body['sha'],SHA);self.assertEqual(body['merge_method'],'merge')
-  api.source['merged_at']='fixture';api.mutations=[];p.integrate(api,CFG,9);self.assertEqual(api.mutations,[])
+  api.mutations=[];p.integrate(api,CFG,9);self.assertEqual(api.mutations,[])
  def test_gate_no_unauthorized_source_merge(self):
   for mutate in [lambda a:a.promotion['merged_by'].update(id=99),lambda a:a.promotion.update(merged=False),lambda a:a.doc.update(promotion_pr=10),lambda a:a.doc.update(version=2),lambda a:a.doc.update(app='other'),lambda a:a.doc.update(command='evil'),lambda a:a.doc.update(candidate_id='0'*64),lambda a:a.source['head'].update(sha='e'*40),lambda a:a.run.update(conclusion='failure')]:
    api=Fake();mutate(api)
@@ -176,5 +187,77 @@ class Delivery(unittest.TestCase):
     if 'uses' in step:self.assertRegex(step['uses'],r'@[a-f0-9]{40}$')
   upload=next(s for s in cfg['jobs']['publish']['steps'] if 'uses' in s)
   self.assertEqual(upload['with']['retention-days'],90);self.assertEqual(upload['with']['name'],'specops-candidate-v1')
+
+ def test_real_merged_run_provenance_uses_candidate_pr_and_immutable_job_times(self):
+  fixture=json.loads((ROOT/'tests/fixtures/ci-merged-cebo.json').read_text());cfg=CONFIGS['cebo']
+  class Real:
+   def request(self,path,*args):
+    if '/actions/runs/' in path:return fixture['run']
+    if '/pulls/' in path:return fixture['pr']
+    if '/actions/workflows/' in path:return {'id':fixture['run']['workflow_id']}
+    if '/git/commits/' in path:return {'tree':{'sha':TREE}}
+    raise AssertionError(path)
+   def pages(self,path,*args,**kwargs):
+    if '/attempts/' in path:return fixture['jobs']
+    if '/files' in path:return [{'filename':'apps/api/src/server.ts'}]
+    if '/runs?' in path:return [fixture['run']]
+    raise AssertionError(path)
+  api=Real();run_id=fixture['run']['id']
+  self.assertEqual(p.provenance(api,cfg,run_id,open_only=False,pr_number=2)['pr'],2)
+  with self.assertRaises(ValueError):p.provenance(api,cfg,run_id)
+  for field,changed in [('number',99),('repository','evil/repo'),('sha','0'*40),('association',[{'number':99}]),('actor',99),('workflow',99),('closed',False),('late','2026-11-26T03:00:00Z')]:
+   original=copy.deepcopy(fixture)
+   if field=='number':fixture['pr']['number']=changed
+   elif field=='repository':fixture['run']['head_repository']['full_name']=changed
+   elif field=='sha':fixture['pr']['head']['sha']=changed
+   elif field=='association':fixture['run']['pull_requests']=changed
+   elif field=='actor':fixture['run']['actor']['id']=changed
+   elif field=='workflow':fixture['run']['workflow_id']=changed;api_workflow=fixture['run']['workflow_id']
+   elif field=='closed':fixture['pr'].update(merged=False,merged_at=None)
+   elif field=='late':fixture['jobs'][0]['completed_at']=changed
+   # The workflow endpoint is independent of a tampered run's workflow ID.
+   if field=='workflow':
+    with patch.object(api,'request',side_effect=lambda path,*args: {'id':original['run']['workflow_id']} if '/actions/workflows/' in path else Real.request(api,path,*args)):
+     with self.assertRaises(ValueError):p.provenance(api,cfg,run_id,open_only=False,pr_number=2)
+   else:
+    with self.subTest(field=field),self.assertRaises(ValueError):p.provenance(api,cfg,run_id,open_only=False,pr_number=2)
+   fixture.clear();fixture.update(original)
+ def test_repeated_periodic_integration_after_merge_skips_ci_without_skipping_identity(self):
+  api=Fake();p.integrate(api,CFG,9);self.assertEqual(api.run['pull_requests'],[])
+  mutations=list(api.mutations);original=api.request
+  def no_ci(path,*args):
+   if '/actions/runs/' in path:raise AssertionError('Already integrated source re-fetched CI')
+   return original(path,*args)
+  with patch.object(api,'request',side_effect=no_ci):
+   for _ in range(3):p.integrate_periodic(api,{APP:CFG})
+  self.assertEqual(api.mutations,mutations)
+  for mutate in [lambda a:a.promotion['merged_by'].update(id=99),lambda a:a.doc.update(candidate_id='0'*64),lambda a:a.source.update(number=99),lambda a:a.source['head'].update(sha='e'*40),lambda a:a.source['head']['repo'].update(full_name='evil/fork'),lambda a:a.source['user'].update(id=99)]:
+   bad=Fake();p.integrate(bad,CFG,9);bad.mutations=[];mutate(bad)
+   with self.assertRaises(ValueError):p.integrate_periodic(bad,{APP:CFG})
+   self.assertEqual(bad.mutations,[])
+ def test_periodic_retry_recovers_lost_response_after_source_merge(self):
+  api=Fake();original=api.request;failed=[False]
+  def interrupted(path,*args):
+   if '/compare/' in path and not failed[0]:failed[0]=True;raise ValueError('temporary-network-failure')
+   return original(path,*args)
+  with patch.object(api,'request',side_effect=interrupted):
+   with self.assertRaises(ValueError):p.integrate(api,CFG,9)
+  self.assertEqual(api.run['pull_requests'],[]);mutations=list(api.mutations)
+  p.integrate_periodic(api,{APP:CFG});self.assertEqual(api.mutations,mutations)
+ def test_open_source_and_required_ci_cannot_drop_or_contradict_association(self):
+  for refs in ([],[{'number':99}],[{'number':7},{'number':99}]):
+   api=Fake();api.run['pull_requests']=refs
+   with self.assertRaises(ValueError):p.provenance(api,CFG,100)
+  api=Fake();original=api.pages
+  def wrong_required(path,*args,**kwargs):
+   rows=original(path,*args,**kwargs)
+   if '/actions/workflows/' in path:
+    rows[0]['pull_requests']=[]
+   return rows
+  with patch.object(api,'pages',side_effect=wrong_required),self.assertRaises(ValueError):p.integrate(api,CFG,9)
+  self.assertEqual(api.mutations,[])
+ def test_ci_helper_is_identical_to_core_when_core_is_present(self):
+  core=ROOT/'specops/ci.py'
+  if core.exists():self.assertEqual(core.read_bytes(),(ROOT/'specops_delivery/ci.py').read_bytes())
 
 if __name__=='__main__':unittest.main()
