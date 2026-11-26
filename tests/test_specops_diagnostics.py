@@ -11,15 +11,28 @@ import tempfile
 import unittest
 from unittest.mock import Mock,patch
 import urllib.error
+import yaml
 from specops_delivery import producer as p
 from specops_delivery.diagnostics import Failure,SAFE_CODES,diagnostic_record,stage
-from specops_delivery.render import CONFIGS
+from specops_delivery.render import CONFIGS,publisher
 
 ROOT=Path(__file__).resolve().parents[1]
 SECRET='PRIVATE-SENTINEL-never-log-this'
 
 
 class Diagnostics(unittest.TestCase):
+    def test_incident_ci_is_readonly_and_review_base_cannot_publish(self):
+        workflow=yaml.safe_load((ROOT/'.github/workflows/specops-readback.yml').read_text())
+        event=workflow.get('on',workflow.get(True))
+        self.assertEqual(event['pull_request']['branches'],['review/specops-issue-40'])
+        self.assertTrue(all(value=='read' for value in workflow['permissions'].values()))
+        checkout=workflow['jobs']['readback']['steps'][0]
+        self.assertFalse(checkout['with']['persist-credentials'])
+        cfg=CONFIGS['portal'];sha='a'*40
+        pr={'number':7,'state':'open','user':{'id':p.OWNER},'head':{'sha':sha,'repo':{'full_name':cfg['repository']}},
+            'base':{'ref':'review/specops-issue-40','repo':{'full_name':cfg['repository']}}}
+        with self.assertRaisesRegex(ValueError,'source-pr'):p.source_identity(pr,cfg,7,sha,True)
+
     def record(self,error):
         record=diagnostic_record(error)
         self.assertNotIn(SECRET,json.dumps(record))
@@ -139,6 +152,37 @@ class Diagnostics(unittest.TestCase):
             self.assertIn('--cap-drop',runtime)
             self.assertEqual(runtime[-1],ref)
             self.assertTrue(all('ghcr.io' not in ' '.join(args) for args,step in calls))
+
+    def test_copy_only_job_reports_fixed_errors_without_registry_output(self):
+        cfg=publisher('portal')['jobs']['publish']
+        login=next(s['run'] for s in cfg['steps'] if s.get('name')=='Login only in copy-only job')
+        copy=next(s['run'] for s in cfg['steps'] if s.get('id')=='copy')
+        raw=b'{"schemaVersion":2}\n';digest='sha256:'+hashlib.sha256(raw).hexdigest()
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);binary=root/'skopeo'
+            binary.write_text('#!/usr/bin/env python3\nimport os,sys\n'
+                'mode=sys.argv[1]\n'
+                'if os.environ.get("FAIL_COMMAND")==mode:\n'
+                ' print(os.environ["PRIVATE_SENTINEL"]);print(os.environ["PRIVATE_SENTINEL"],file=sys.stderr);sys.exit(1)\n'
+                'if mode=="inspect":sys.stdout.buffer.write('+repr(raw)+')\n')
+            binary.chmod(0o755)
+            env={**os.environ,'PATH':str(root)+':'+os.environ['PATH'],'RUNNER_TEMP':temp,
+                 'GITHUB_ACTOR':'fixture','GITHUB_RUN_ID':'12','GHCR_TOKEN':SECRET,
+                 'PRIVATE_SENTINEL':SECRET,'OCI_PATH':temp+'/synthetic.oci.tar',
+                 'EXPECTED':digest,'GITHUB_OUTPUT':str(root/'output')}
+            for mode,script in (('login',login),('copy',copy),('inspect',copy),('digest',copy),('success',copy)):
+                with self.subTest(mode=mode):
+                    scenario={**env,'FAIL_COMMAND':mode}
+                    if mode=='digest':scenario['EXPECTED']='sha256:'+'0'*64
+                    result=subprocess.run(['bash','-c',script],env=scenario,capture_output=True,text=True)
+                    self.assertNotIn(SECRET,result.stdout+result.stderr)
+                    if mode=='success':
+                        self.assertEqual(result.returncode,0)
+                        self.assertEqual((root/'output').read_text(),'digest='+digest+'\n')
+                        self.assertEqual((root/'remote-index.json').stat().st_mode&0o777,0o600)
+                    else:
+                        self.assertNotEqual(result.returncode,0)
+                        self.assertIn('stage=ghcr-'+mode,result.stderr)
 
 
 if __name__=='__main__':unittest.main()

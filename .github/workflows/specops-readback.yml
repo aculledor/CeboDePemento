@@ -1,6 +1,7 @@
 name: SpecOps — read-only real artifact verification
 on:
   pull_request:
+    branches: [review/specops-issue-40]
 permissions:
   contents: read
   actions: read

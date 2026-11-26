@@ -151,3 +151,5 @@ El entorno todavía bloquea el dominio de la Xunta con 403. No se ha realizado u
 Drizzle tipa catálogo y usuarios; las consultas de cálculo, auditoría y relaciones complejas usan SQL parametrizado. Las migraciones SQL tienen checksum, transacción y copia previa. No edites una migración aplicada: añade otra. El servidor se niega a escribir sobre la base original, también a través de un enlace simbólico.
 
 Consulta `docs/ESTADO.md` y `docs/VERIFICACION.md` para las comprobaciones realizadas y sus límites. El PDF se conserva como fuente editorial, sin extraer indiscriminadamente sus imágenes. Los requisitos actualizados prevalecen sobre `REQUISITOS.md`.
+
+Publicadores SpecOps: [incidente #40, diagnósticos seguros y actualización de confianza](docs/SPECOPS_VERIFY_BOOTSTRAP.md).

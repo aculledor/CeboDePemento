@@ -36,14 +36,15 @@ def publisher(app):
  verified={'VERIFIED_DIGEST':'${{ needs.verify.outputs.digest }}','VERIFIED_ARTIFACT_ID':'${{ needs.verify.outputs.artifact_id }}','VERIFIED_ARTIFACT_DIGEST':'${{ needs.verify.outputs.artifact_digest }}'}
  publish={'if':condition+" && needs.verify.outputs.already_published != 'true'",'needs':'verify','runs-on':'ubuntu-24.04','timeout-minutes':20,'permissions':{'contents':'read','actions':'read','pull-requests':'read','packages':'write'},'steps':[
   {'run':'sudo apt-get update -qq && sudo apt-get install -y skopeo'},step(c,'fetch',id='input',env=verified),
-  {'name':'Login only in copy-only job','env':{'GHCR_TOKEN':'${{ github.token }}'},'run':"set -euo pipefail\numask 077\nprintf '%s' \"$GHCR_TOKEN\" | skopeo login --authfile \"$RUNNER_TEMP/specops-auth.json\" --username \"$GITHUB_ACTOR\" --password-stdin ghcr.io"},
+  {'name':'Login only in copy-only job','env':{'GHCR_TOKEN':'${{ github.token }}'},'run':"set -euo pipefail\numask 077\nprintf '%s' \"$GHCR_TOKEN\" | skopeo login --authfile \"$RUNNER_TEMP/specops-auth.json\" --username \"$GITHUB_ACTOR\" --password-stdin ghcr.io >/dev/null 2>&1 || { echo 'SpecOps stage=ghcr-login code=command-failed' >&2; exit 1; }"},
   {'name':'Copy tested OCI without execution or rebuild','id':'copy','env':{'EXPECTED':'${{ needs.verify.outputs.digest }}','OCI_PATH':'${{ steps.input.outputs.oci_path }}'},'run':f'''set -euo pipefail
+umask 077
 [[ "$EXPECTED" =~ ^sha256:[0-9a-f]{{64}}$ && "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]]
 ref="{c['image']}:candidate-$GITHUB_RUN_ID"
-skopeo copy --all --preserve-digests --authfile "$RUNNER_TEMP/specops-auth.json" "oci-archive:$OCI_PATH" "docker://$ref"
-skopeo inspect --raw --authfile "$RUNNER_TEMP/specops-auth.json" "docker://$ref" > "$RUNNER_TEMP/remote-index.json"
+skopeo copy --all --preserve-digests --authfile "$RUNNER_TEMP/specops-auth.json" "oci-archive:$OCI_PATH" "docker://$ref" >/dev/null 2>&1 || {{ echo 'SpecOps stage=ghcr-copy code=command-failed' >&2; exit 1; }}
+skopeo inspect --raw --authfile "$RUNNER_TEMP/specops-auth.json" "docker://$ref" > "$RUNNER_TEMP/remote-index.json" 2>/dev/null || {{ echo 'SpecOps stage=ghcr-inspect code=command-failed' >&2; exit 1; }}
 actual="sha256:$(sha256sum "$RUNNER_TEMP/remote-index.json" | cut -d' ' -f1)"
-[[ "$actual" == "$EXPECTED" ]]
+[[ "$actual" == "$EXPECTED" ]] || {{ echo 'SpecOps stage=ghcr-digest code=published-digest-changed' >&2; exit 1; }}
 printf 'digest=%s\\n' "$actual" >> "$GITHUB_OUTPUT"
 '''},step(c,'candidate',id='candidate',env={**verified,'REMOTE_DIGEST':'${{ steps.copy.outputs.digest }}'}),
   {'uses':UPLOAD,'with':{'name':'specops-candidate-v1','path':'${{ steps.candidate.outputs.candidate_path }}','retention-days':90,'if-no-files-found':'error'}},

@@ -175,6 +175,7 @@ def run(args, raw=False, step='local-command'):
         return result.stdout if raw else result.stdout.strip()
 
 
+@diagnostic('oci-inspect')
 def inspect_oci(path,cfg,sha):
     raw=run(['skopeo','inspect','--raw','oci-archive:'+str(path)], raw=True,step='oci-index')
     index=json.loads(raw);manifests=index.get('manifests',[])
@@ -190,6 +191,7 @@ def runtime_fixture(cfg):
     return {'origin':origin,'gatewaySecret':'a'*64,'publicOrigins':{'navidrome':'https://portal-fixture.invalid:18545','jellyfin':'https://portal-fixture.invalid:18546'},'oidc':{'issuer':'https://identity-fixture.invalid/application/o/fixture/','clientId':'fixture','clientSecret':'c'*48},'identity':{'apiOrigin':'https://identity-fixture.invalid','apiToken':'d'*48,'manageAccess':False,'enrollment':{},'recoveryPath':'/if/flow/fixture/'},'groups':{'admin':['requests'],'familiar':['requests'],'invitado':['requests']},'mappings':{},'seerr':{'baseUrl':'http://seerr:5055','apiKey':'synthetic-fixture-only','mode':'read','contractVerified':False},'navidrome':{'enabled':False,'baseUrl':'http://navidrome:4533'},'jellyfin':{'enabled':False,'baseUrl':'http://192.168.1.145:8096'}}
 
 
+@diagnostic('runtime-test')
 def test_digest(path,cfg,digest,work):
     require(os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted' and not os.environ.get('DOCKER_HOST') and os.uname().nodename!='nuc-cas','hosted-fixture-only')
     suffix=str(os.getpid());registry='specops-registry-'+suffix;app='specops-app-'+suffix

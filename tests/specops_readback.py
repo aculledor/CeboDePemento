@@ -20,7 +20,6 @@ from specops_delivery.render import CONFIGS
 APP='portal' if (Path(__file__).resolve().parents[1]/'apps/portal').exists() else 'cebo'
 SOURCE={'portal':45903242249,'cebo':45903253447}
 CURRENT='startup'
-CODES=frozenset('github-unavailable api-pagination-limit artifact-redirects api-size api-path api-url artifact-host api-list artifact-size-or-checksum artifact-size artifact-checksum build-artifact-ambiguous build-artifact-members build-size source-pr-association source-pr-number source-pr source-pr-state source-pr-not-merged source-obsolete source-provenance source-actor source-ci source-run-id source-tree source-outside-scope migration-not-supported-v1 ci-pr-association ci-pr-not-merged ci-after-merge ci-job-provenance ci-jobs-absent ci-timestamp oci-platform oci-provenance command-failed hosted-fixture-only registry-loopback registry-rewrote-digest tested-image-identity previous-candidate-tree candidate-archive-size'.split())
 HTTP=frozenset((200,201,204,301,302,303,304,307,308,400,401,403,404,408,410,422,429,500,502,503,504))
 
 
