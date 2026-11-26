@@ -9,6 +9,12 @@ import subprocess
 import socket
 import struct
 import shutil
+import hashlib
+import os
+import ssl
+import stat
+import tempfile
+import time
 
 PROJECT = "cebo-pemento-dev"
 HOST = "cebo-dev.home.arpa"
@@ -24,8 +30,80 @@ def require(value, message):
 
 def command(*args):
     result = subprocess.run(args, check=True, text=True, capture_output=True, timeout=30,
-                            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/root"})
+                            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/root",
+                                 "LC_ALL": "C", "OPENSSL_CONF": "/dev/null"})
     return result.stdout.strip()
+
+
+def write_tls_status(path, value):
+    """Reuse SpecOps' private state directory; no new service or log per tick."""
+    path = Path(path).absolute()
+    for part in (path.parent, *path.parent.parents):
+        require(not part.is_symlink(), "tls-status-symlink")
+    info = path.parent.stat()
+    require(info.st_uid == os.geteuid() and not info.st_mode & 0o022, "tls-status-directory")
+    previous = None
+    if path.exists() or path.is_symlink():
+        info = path.lstat()
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
+                info.st_uid == os.geteuid() and info.st_mode & 0o777 == 0o600, "tls-status-permissions")
+        previous = json.loads(path.read_text())
+    if previous == value:
+        return False
+    fd, temporary = tempfile.mkstemp(prefix=".cebo-tls-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as output:
+            json.dump(value, output, sort_keys=True)
+            output.flush(); os.fsync(output.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(directory)
+        finally: os.close(directory)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+    # Daily freshness updates do not repeat the warning.
+    return previous is None or any(previous.get(k) != value.get(k) for k in ("warnings", "valid", "fingerprints"))
+
+
+def tls_health(directory, status=None, now=None):
+    """Public-cert expiry warning without early failure or an offline CA key."""
+    now = time.time() if now is None else now
+    directory = Path(directory).absolute() / "tls"
+    warnings, dates, fingerprints = [], {}, {}
+    valid = False
+    try:
+        for part in (directory, *directory.parents):
+            require(not part.is_symlink(), "tls-path-symlink")
+        require({p.name for p in directory.iterdir()} == {"server.key", "server.crt", "root.crt"}, "tls-bundle-files")
+        for name in ("server.key", "server.crt", "root.crt"):
+            info = (directory / name).lstat()
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and not info.st_mode & 0o022, "tls-file-permissions")
+        require(not (directory / "server.key").stat().st_mode & 0o007, "tls-key-world-readable")
+        for role, name in (("server", "server.crt"), ("ca", "root.crt")):
+            path = str(directory / name)
+            end = command("openssl", "x509", "-in", path, "-noout", "-enddate").removeprefix("notAfter=")
+            expires = ssl.cert_time_to_seconds(end)
+            dates[role] = int(expires)
+            fingerprints[role] = hashlib.sha256(ssl.PEM_cert_to_DER_cert(Path(path).read_text())).hexdigest()
+            if expires <= now: warnings.append(role + "-expired")
+            elif expires - now <= 30 * 86400: warnings.append(role + "-expires-within-30-days")
+        public = command("openssl", "x509", "-in", str(directory / "server.crt"), "-pubkey", "-noout")
+        require(public == command("openssl", "pkey", "-in", str(directory / "server.key"), "-pubout"), "tls-key-mismatch")
+        san = command("openssl", "x509", "-in", str(directory / "server.crt"), "-noout", "-ext", "subjectAltName")
+        require(" ".join(san.split()) == "X509v3 Subject Alternative Name: DNS:" + HOST, "tls-san")
+        command("openssl", "verify", "-check_ss_sig", "-attime", str(int(now)), "-CAfile", str(directory / "root.crt"), str(directory / "root.crt"))
+        command("openssl", "verify", "-attime", str(int(now)), "-purpose", "sslserver", "-CAfile", str(directory / "root.crt"),
+                "-verify_hostname", HOST, str(directory / "server.crt"))
+        valid = True
+    except (OSError, ValueError, subprocess.SubprocessError):
+        if not any(w.endswith("-expired") for w in warnings): warnings.append("tls-invalid")
+    value = {"version": 1, "host": HOST, "valid": valid, "warnings": warnings,
+             "expires_at": dates, "fingerprints": fingerprints, "checked_utc_day": int(now // 86400)}
+    changed = write_tls_status(status, value) if status else True
+    if changed and warnings:
+        print("<4>DEV TLS: " + ", ".join(warnings) + "; renew offline; see cebo-dev-tls.json expiry dates.")
+    require(valid, "tls-invalid-or-expired")
+    return value
 
 
 def validate(config, mode, directory):
@@ -166,15 +244,25 @@ def runtime(config):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", required=True)
+    parser.add_argument("--config")
     parser.add_argument("--directory", required=True)
     parser.add_argument("--mode", choices=("lan", "ci"), default="lan")
     parser.add_argument("--runtime", action="store_true")
     parser.add_argument("--guards", action="store_true", help="Check pre-existing host guards before boot; read-only")
+    parser.add_argument("--tls-only", action="store_true", help="Existing SpecOps ExecStartPre: no Docker or network access")
+    parser.add_argument("--tls-status", help="Private local status JSON; warnings only on transitions")
     args = parser.parse_args()
+    if args.tls_only:
+        try:
+            tls_health(args.directory, args.tls_status)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            parser.exit(1, "DEV TLS invalid or expired; inspect private TLS status and renew offline.\n")
+        raise SystemExit(0)
+    if not args.config: parser.error("--config is required unless --tls-only")
     config = json.loads(Path(args.config).read_text())
     validate(config, args.mode, args.directory)
     if args.guards:
+        tls_health(args.directory, args.tls_status)
         resources()
         firewall(lambda chain: command("iptables", "-w", "2", "-S", chain).splitlines())
         if args.mode == "lan":

@@ -94,6 +94,9 @@ jobs:
           skopeo inspect --raw "oci-archive:$RUNNER_TEMP/cebo.oci.tar" > "$RUNNER_TEMP/checked-oci.json"
           actual="sha256:$(sha256sum "$RUNNER_TEMP/checked-oci.json" | cut -d' ' -f1)"
           [[ "$actual" == "$EXPECTED_DIGEST" ]]
+      - name: Probar publicación OCI completa contra registro loopback desechable
+        env: { EXPECTED_DIGEST: '${{ steps.build.outputs.digest }}' }
+        run: bash scripts/oci-registry-smoke.sh "$RUNNER_TEMP/cebo.oci.tar"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:

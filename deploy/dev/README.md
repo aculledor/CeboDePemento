@@ -64,9 +64,9 @@ un cambio aprobado aparte. Las cookies no aíslan por puerto. No exponer WAN.
 ## TLS: clave emisora exclusivamente offline
 
 Se elimina `tls internal` y sus volúmenes CA. Caddy solo recibe un certificado
-servidor de 30 días y su clave, de solo lectura, emitidos por una CA offline con
+servidor de 365 días (un año) y su clave, de solo lectura, emitidos por una CA offline con
 `nameConstraints` crítico para `cebo-dev.home.arpa` y exclusión de IPs.
-La raíz tiene `pathlen:0`: no puede emitir intermediarias. La clave raíz nunca
+La raíz dura 1825 días (aproximadamente cinco años) y tiene `pathlen:0`: no puede emitir intermediarias. La clave raíz nunca
 se copia al NUC, a la imagen, artifacts ni Git. Caddy funciona como UID/GID1000,
 sin almacenamiento CA persistente; `/data`, `/config` y `/tmp` son tmpfs limitados.
 
@@ -85,10 +85,108 @@ cliente antes de habilitarlo. Las pruebas OpenSSL comprueban que un certificado
 firmado por esa CA para `example.com` se rechaza, además de SAN/hostname y TLS real
 con curl. No usar `-k`, HTTP de sustitución ni desactivar CSRF.
 
-Renovación: emitir una nueva hoja offline antes de 30 días, validar y reemplazar
-solo los archivos revisados; actualizar sellos/reiniciar gateway mediante una
-operación local autorizada. Es mantenimiento privilegiado de TLS, no un comando
-por release de aplicación. No activar el entorno sin responsable de renovación.
+### Renovación anual con la misma CA
+
+Ejecutar el emisor en Linux/WSL con Python 3 y OpenSSL, desde el equipo de
+administración donde se custodia la CA, nunca en el NUC. La renovación anual
+offline es mantenimiento excepcional; ningún despliegue ordinario requiere
+este paso. Guardar copia cifrada de la CA fuera del NUC y no subir sus claves
+reales a CI, artifacts, Git ni contenedores. CI crea únicamente raíces sintéticas
+y desechables para las pruebas, sin recibir esa CA real.
+
+Conservar el paquete TLS público/clave de hoja actual en el equipo de
+administración para comprobar identidad. Se renueva así:
+
+```bash
+python3 scripts/dev-certificates.py --renew \
+  --ca-dir /RUTA_OFFLINE/ca \
+  --tls-dir /RUTA_ADMIN/tls-actual \
+  --output-dir /RUTA_ADMIN/tls-renovado
+```
+
+El destino tiene que ser nuevo/vacío y separado. **No se sobrescribe el paquete
+activo**: primero genera y verifica los tres archivos en un staging privado,
+luego publica el directorio completo con rename y fsync. Un fallo no deja una
+pareja nueva a medias. Cambian clave, serial y hoja; `root.crt` conserva su huella
+y `root.key` no se modifica. No se reinstala confianza en móviles al renovar.
+
+Antes de firmar se comprueban propietario/permisos, ausencia de symlinks y
+hardlinks, correspondencia CA/clave, raíz autofirmada vigente, restricciones
+críticas exactas y SAN exclusivo de DEV; se compara la raíz con la del paquete
+actual. Se admite renovar una hoja ya caducada, con CA todavía válida. La raíz
+debe cubrir toda la nueva hoja de 365 días: si queda menos de un año más margen,
+se rechaza la operación y hay que planificar un rollover explícito con una nueva
+CA y volver a confiarla. No se alarga silenciosamente la raíz ni se amplían sus
+nombres. Una raíz antigua de 365 días no se convierte mágicamente en una de cinco
+años: al no estar este DEV activado, preparar la nueva CA antes del bootstrap.
+
+### Aviso 30 días antes, sin otro servicio
+
+El drop-in de `servidor-specops@cebo-dev.service` añade un `ExecStartPre` de
+`validate-dev.py --tls-only`. Se ejecuta en cada tick ya existente, aunque el
+preflight de arranque tenga `RemainAfterExit`. Solo lee hoja/clave y raíz
+pública; nunca solicita la clave CA ni conexión de red. También lo comprueba el
+preflight inicial. No hay otro daemon, timer ni proveedor de avisos.
+
+A 30 días o menos de caducar **la hoja o la CA**, devuelve éxito mientras la
+cadena siga siendo válida, publica advertencia de prioridad warning en journald
+y guarda fechas/huellas públicas y estado en
+`/var/lib/servidor-specops/cebo-dev-tls.json` root 0600. No repite el aviso en cada
+tick ni reescribe el archivo si no cambia (solo refresco diario y transiciones).
+Un certificado realmente caducado/incorrecto bloquea el tick antes del motor,
+evita que recover intente recrear la app para corregir un certificado, y deja
+el motivo en ese estado. No implica envío de correo/push: el aviso está en el
+estado local y el journal existentes. Consultar mediante:
+
+```bash
+sudo journalctl -u servidor-specops@cebo-dev.service --priority=warning --since '31 days ago'
+sudo cat /var/lib/servidor-specops/cebo-dev-tls.json
+```
+
+Instalar una vez la copia root actualizada de `validate-dev.py` (0644), el
+preflight existente y ese drop-in únicamente durante el bootstrap autorizado.
+La unidad central ya permite escribir en su directorio privado de estado con
+`ProtectSystem=strict`: no se amplía el sandbox ni se cambia PR #34. Si falta el
+drop-in instalado, la declaración en Git no constituye aviso automático activo.
+
+### Sustitución de TLS y sellos SpecOps: ventana DEV autorizada
+
+No ejecutar estos pasos desde un PR ni aplicarlos a PROD. El paquete renovado
+se transfiere **solo a DEV**, sin `root.key`. Tras comprobar nueva hoja y misma
+huella raíz en el equipo offline:
+
+1. Parar el timer `servidor-specops@cebo-dev.timer` y esperar a que su servicio
+   termine. Adquirir el lock **central por app**
+   `/var/lib/servidor-specops/cebo.lock` (compartido con cebo-prod); no usar el
+   antiguo lock GitOps global para DEV. Preparar copia privada del perfil root y
+   directorio TLS anterior. No borrar journals, recibos ni cuarentenas.
+2. Validar paquete, fechas, SAN y correspondencia clave/hoja; directorio nuevo
+   root:1000 0750, hoja/raíz públicas 0644 y clave hoja root:1000 0640. Revisar
+   que solo contiene `server.crt`, `server.key`, `root.crt` y ningún symlink.
+   La CA privada permanece en el equipo offline. No cambiar trust store.
+3. Detener **solo `gateway-dev`** con el Compose/env/proyecto DEV instalados.
+   Renombrar `tls` a un respaldo y mover el nuevo directorio a la ruta fija
+   `/opt/servicios-dev/cebo-pemento/tls`. No usar symlinks: el validador central
+   los rechaza. Mantener rutas, Compose e imagen de la app; no tocar su volumen.
+4. Arrancar el contenedor gateway existente con `compose start gateway-dev`
+   para reabrir el bind del directorio nuevo; un simple reload tras cambiar el
+   directorio no garantiza reabrir el bind Docker. Verificar por HTTPS con la
+   **CA anterior ya confiada**, hostname/SAN y que el peer sirve la hoja nueva.
+   El smoke prueba este stop/start conservando IDs de app y gateway.
+5. En `/etc/servidor-casa/specops/cebo-dev.json`, actualizar de forma atómica
+   **solo** los SHA-256 de los tres archivos TLS de `seals` (incluir los tres en
+   bootstrap), leyendo bytes de archivos regulares root revisados. No recalcular
+   ciegamente otros sellos ni relajar comprobaciones. `compose_hash` no cambia:
+   solo cambiaron los bytes de TLS en las mismas rutas, no el manifiesto.
+   El perfil debe seguir root 0600. Nunca subir el perfil o la clave a Git.
+6. Ejecutar el guard TLS y el `--check` del motor instalado, aún con el timer
+   parado y el lock. Si falla, detener solo gateway, restituir directorio TLS y
+   perfil anteriores, arrancar gateway y validar antes de salir. La app y PROD
+   no se recrean. Liberar lock y reactivar el mismo timer solo tras el éxito.
+
+Estas acciones no están ejecutadas ni automatizadas como despliegue por este
+PR. El reconciliador deliberadamente no instala certificados ni actualiza sus
+propios sellos de confianza desde código del PR.
 
 ## Recursos, red y preflight
 
@@ -134,9 +232,8 @@ fuera del clon. Las referencias systemd incluyen un preflight leído antes de
 revisado. El preflight comprueba recursos/egress, HDD UUID y DNS LAN sin montar,
 arrancar ni modificar servicios críticos. Si falla, DEV no arranca.
 
-El helper usa `/run/lock/cebo-pemento-dev.lock`. El contrato central todavía
-coordina también el lock GitOps global: se conserva, sin editar PR #34 durante
-su revisión. Para evitar backups perdidos por contención se corrige la copia de
+El helper usa `/run/lock/cebo-pemento-dev.lock`. El contrato central revisado en `22a9d4e` separa DEV del lock GitOps global y
+limita el global a mutaciones PROD; no se modifica PR #34 durante su revisión. Para evitar backups perdidos por contención se corrige la copia de
 referencia de `deploy/nuc/deploy.py`: `--backup` espera hasta 300s, falla con error
 visible al agotarlo y su unidad admite 900s. `--auto` conserva su skip/reintento.
 Instalar ese helper root es una operación manual independiente; Git no lo cambia.
@@ -168,10 +265,62 @@ DNS externo y parada/arranque completo preservando IDs y el servicio sintético.
 No modifica NUC ni usa datos privados. El job publish debe permanecer skipped.
 
 Referencia consultada: servidor-casa PR #34, ADR-004 y host.py del SHA
-`d91fa23f1a731aeef7c4129fce0553b1313a1e50`, **solo lectura**. El perfil futuro usa
+`22a9d4e94184b83b0b07d28b26919bfc00d7a27f`, **solo lectura**. El perfil futuro usa
 app `cebo`, proyecto `cebo-pemento-dev`, servicio `app-dev`, esquema conservado,
 seals/compose_hash locales, redes/subredes de esta tabla y volumen prefijado.
 El publicador confiable de `specops-candidate-v1`, actor/workflow SHA fijados,
 prueba del digest publicado, atestación del workflow y PR de promoción siguen
 pendientes en #3 hasta concluir la revisión central. No activar ni simular una
 publicación de candidatos desde este PR.
+
+## P2 de Claude: alcance y riesgo residual
+
+**Workflow editable por un PR interno (4702647005).** La separación de jobs y
+credenciales protege frente a dependencias/scripts comprometidos dentro del
+workflow revisado. Un commit interno malicioso puede editar el propio YAML,
+quitar el if/guard o pedir packages:write: este PR no constituye una barrera
+contra ese cambio. En el modelo doméstico, autores internos son el administrador
+y sus agentes, y ese riesgo residual se documenta; revisar cambios de workflows
+con cuidado. Recomendar aprobación de ejecución de colaboradores externos y
+protección de ramas/workflows si disponibles, sin afirmar que se hayan aplicado
+settings ni exigir otro servicio/plan. La aprobación PROD por cuenta GitHub del
+administrador es la decisión vigente; no prueba presencia humana independiente.
+
+Durante la transición, el actualizador legacy consulta la etiqueta sha-main y
+puede consumir una publicación adelantada. Antes de integrar/activar, pausar y
+enmascarar `cebo-pemento-update.timer` con autorización local, conservar el backup
+diario con espera/fallo visible y completar transición SpecOps. **No reactivar
+el timer de imágenes antiguo después de la transición.** SpecOps selecciona
+por digest y evidencia del publicador fijado en root; esto evita depender de
+etiquetas, no convierte en infalible a un administrador/workflow malicioso.
+ADR-004 se ha consultado solo en lectura; su actualización central corresponde
+a #34 cuando termine la revisión, no a este PR. No se inicia #3.
+
+**Publicación no ejecutada en PR (4702647018).** Ahora test-image hace la misma
+copia `skopeo copy --all --preserve-digests` a `registry:2.8.3` efímero en loopback,
+sin login ni credenciales. Verifica digest del índice remoto, manifest AMD64 y
+manifests de atestación/SBOM. El registro usa tmpfs y se elimina al terminar; no
+hay servicio nuevo persistente. `publish` sigue skipped, sin escritura GHCR ni
+artifact candidato en PR. No se prueba con ello autenticación/ACL ni el servicio
+GHCR real: esa parte sigue pendiente de la publicación main autorizada.
+
+## Entrega para revisión independiente
+
+Claude debe obtener el HEAD real del PR #2, revisar el diff y ejecutar:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+python3 -m compileall -q scripts/dev-certificates.py scripts/validate-dev.py tests
+for script in scripts/*.sh deploy/dev/preflight.sh; do bash -n "$script"; done
+npm run typecheck && npm test && npm run build
+npx playwright test
+```
+
+Revisar CI del **mismo SHA**: renovación TLS realmente servida por Caddy usando
+la CA anterior, IDs/imagen/volumen conservados, guardias/cgroups, OCI remoto con
+mismos digests y publish skipped. Comprobar 30 días de aviso sin fallo temprano,
+aviso de CA, expiración real, renovación de hoja caducada y ausencia de claves
+CA en bundle/contexto/artifacts. Ataques: CA ajena, key mismatch, restricciones
+ampliadas/ausentes, SAN ajeno, symlink/hardlink, permisos inseguros, firma fallida
+y destino existente. Solo revisar #34/ADR-004: no editar esa rama, no instalar,
+no fusionar ni desplegar. Este PR sigue draft hasta revisión y transición local.

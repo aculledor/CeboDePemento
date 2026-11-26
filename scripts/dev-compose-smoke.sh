@@ -71,7 +71,38 @@ iptables -A SPECOPS-DEV-HOST -j RETURN
 python3 scripts/validate-dev.py --config "$tmp/config.json" --mode ci --directory "$install_dir" --runtime
 # TLS uses a constrained offline root; no root private key exists in the gateway.
 curl --noproxy '*' --fail --silent --show-error --cacert "$install_dir/tls/root.crt" --resolve cebo-dev.home.arpa:18444:127.0.0.1 https://cebo-dev.home.arpa:18444/api/health
+python3 scripts/validate-dev.py --tls-only --directory "$install_dir" --tls-status "$tmp/cebo-dev-tls.json"
 if curl --noproxy '*' --silent --cacert "$install_dir/tls/root.crt" --resolve wrong.invalid:18444:127.0.0.1 https://wrong.invalid:18444/api/health; then exit 1; fi
+# Annual offline renewal: same trusted root, complete new bundle, app untouched.
+cp "$install_dir/tls/root.crt" "$tmp/trusted-root.crt"
+app_before=$("${compose[@]}" ps -q app-dev)
+gateway_before=$("${compose[@]}" ps -q gateway-dev)
+python3 scripts/dev-certificates.py --renew --ca-dir "$tmp/offline-ca" --tls-dir "$install_dir/tls" --output-dir "$tmp/renewed-tls"
+"${compose[@]}" stop gateway-dev
+mv "$install_dir/tls" "$install_dir/tls-before-renewal"
+mv "$tmp/renewed-tls" "$install_dir/tls"
+"${compose[@]}" start gateway-dev
+for attempt in {1..40}; do
+  if curl --noproxy '*' --fail --silent --cacert "$tmp/trusted-root.crt" --resolve cebo-dev.home.arpa:18444:127.0.0.1 https://cebo-dev.home.arpa:18444/api/health >/dev/null; then break; fi
+  sleep 1
+done
+curl --noproxy '*' --fail --silent --cacert "$tmp/trusted-root.crt" --resolve cebo-dev.home.arpa:18444:127.0.0.1 https://cebo-dev.home.arpa:18444/api/health >/dev/null
+python3 - "$install_dir" "$tmp/trusted-root.crt" <<'PY'
+import hashlib,socket,ssl,sys
+from pathlib import Path
+root=Path(sys.argv[1]); tls=root/'tls'
+assert (tls/'root.crt').read_bytes()==Path(sys.argv[2]).read_bytes()
+assert (tls/'server.crt').read_bytes()!=(root/'tls-before-renewal/server.crt').read_bytes()
+context=ssl.create_default_context(cafile=sys.argv[2])
+with socket.create_connection(('127.0.0.1',18444),timeout=5) as connection:
+    with context.wrap_socket(connection,server_hostname='cebo-dev.home.arpa') as peer:
+        expected=ssl.PEM_cert_to_DER_cert((tls/'server.crt').read_text())
+        assert hashlib.sha256(peer.getpeercert(binary_form=True)).digest()==hashlib.sha256(expected).digest()
+PY
+[[ "$app_before" == "$("${compose[@]}" ps -q app-dev)" ]]
+[[ "$gateway_before" == "$("${compose[@]}" ps -q gateway-dev)" ]]
+python3 scripts/validate-dev.py --tls-only --directory "$install_dir" --tls-status "$tmp/cebo-dev-tls.json"
+echo 'DEV TLS renewal: original CA trusted, new leaf actually served, app and gateway IDs preserved.'
 # A synthetic PROD-labelled service and host listener prove guards block real destinations.
 gateway_image=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["services"]["gateway-dev"]["image"])' "$tmp/config.json")
 docker network create "$sentinel_net" >/dev/null
