@@ -15,13 +15,23 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { persist-credentials: false }
+      - name: Verificar ausencia de credenciales antes de ejecutar código
+        run: |
+          set -euo pipefail
+          if git config --local --get-regexp 'http\..*\.extraheader|credential\..*' >/dev/null; then
+            echo 'Unexpected persisted checkout credential' >&2
+            exit 1
+          fi
+          [[ -z "${GITHUB_TOKEN:-}" && -z "${GHCR_TOKEN:-}" ]]
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: "24.19.0", cache: npm }
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck && npm test && npm run build
       - run: npx playwright install --with-deps chromium
       - run: npx playwright test
-      - run: python3 -m unittest discover -s tests -p test_nuc_deploy.py -v
+      - run: sudo apt-get update -qq && sudo apt-get install -y python3-yaml
+      - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Validar manifiestos y catálogo original
         env: { APP_IMAGE: "cebo-pemento:ci", LAN_IP: "127.0.0.1" }
         run: |
@@ -36,55 +46,104 @@ jobs:
             path: work/browser-results,
             retention-days: 7,
           }
-  image:
+  test-image:
     needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { persist-credentials: false }
+      - name: Verificar ausencia de credenciales antes de ejecutar código
+        run: |
+          set -euo pipefail
+          if git config --local --get-regexp 'http\..*\.extraheader|credential\..*' >/dev/null; then
+            echo 'Unexpected persisted checkout credential' >&2
+            exit 1
+          fi
+          [[ -z "${GITHUB_TOKEN:-}" && -z "${GHCR_TOKEN:-}" ]]
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - name: Construir y probar la imagen sin publicarla
+      - run: sudo apt-get update -qq && sudo apt-get install -y skopeo python3-yaml
+      - name: Construir una vez; conservar OCI, procedencia y SBOM
+        id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/amd64
-          load: true
           push: false
-          tags: cebo-pemento:ci
+          outputs: type=oci,dest=${{ runner.temp }}/cebo.oci.tar
+          provenance: mode=max
+          sbom: true
           build-args: REVISION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Importar el artefacto construido sin reconstruirlo
+        run: skopeo copy --override-os linux --override-arch amd64 "oci-archive:$RUNNER_TEMP/cebo.oci.tar" docker-daemon:cebo-pemento:ci
       - run: bash scripts/docker-smoke.sh cebo-pemento:ci
-      - name: Login GHCR (solo main, nunca PR)
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publicar imagen revisada con procedencia y SBOM
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        id: publish
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          platforms: linux/amd64
-          push: true
-          tags: ghcr.io/aculledor/cebo-de-pemento:sha-${{ github.sha }}
-          build-args: REVISION=${{ github.sha }}
-          cache-from: type=gha
-          provenance: true
-          sbom: true
-      - name: Escribir referencia inmutable para instalación y GitOps
-        if: steps.publish.outcome == 'success'
-        env:
-          DIGEST: ${{ steps.publish.outputs.digest }}
+      - name: Probar Compose DEV aislado con TLS verificado
         run: |
-          printf 'APP_IMAGE=ghcr.io/aculledor/cebo-de-pemento:sha-%s@%s\n' "$GITHUB_SHA" "$DIGEST" > image.env
-          cat image.env >> "$GITHUB_STEP_SUMMARY"
+          image_id=$(docker image inspect cebo-pemento:ci --format '{{.Id}}')
+          sudo env CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted CEBO_DEV_IMAGE="$image_id" bash scripts/dev-compose-smoke.sh
+      - name: Verificar que los smoke no sustituyeron el OCI construido
+        env: { EXPECTED_DIGEST: '${{ steps.build.outputs.digest }}' }
+        run: |
+          set -euo pipefail
+          skopeo inspect --raw "oci-archive:$RUNNER_TEMP/cebo.oci.tar" > "$RUNNER_TEMP/checked-oci.json"
+          actual="sha256:$(sha256sum "$RUNNER_TEMP/checked-oci.json" | cut -d' ' -f1)"
+          [[ "$actual" == "$EXPECTED_DIGEST" ]]
+      - name: Probar publicación OCI completa contra registro loopback desechable
+        env: { EXPECTED_DIGEST: '${{ steps.build.outputs.digest }}' }
+        run: bash scripts/oci-registry-smoke.sh "$RUNNER_TEMP/cebo.oci.tar"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: steps.publish.outcome == 'success'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          name: cebo-tested-oci
+          path: ${{ runner.temp }}/cebo.oci.tar
+          retention-days: 7
+  publish:
+    # This is the existing main release channel, NOT Issue #3 candidates.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test-image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: { contents: read, actions: read, packages: write }
+    steps:
+      # No checkout, npm, Dockerfile, PR scripts or execution of the image here.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: cebo-tested-oci, path: '${{ runner.temp }}/tested' }
+      - run: sudo apt-get update -qq && sudo apt-get install -y skopeo
+      - name: Validar OCI antes de autenticar o escribir en el registro
+        env: { EXPECTED_DIGEST: '${{ needs.test-image.outputs.digest }}' }
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          skopeo inspect --raw "oci-archive:$RUNNER_TEMP/tested/cebo.oci.tar" > "$RUNNER_TEMP/checked-oci.json"
+          actual="sha256:$(sha256sum "$RUNNER_TEMP/checked-oci.json" | cut -d' ' -f1)"
+          [[ "$actual" == "$EXPECTED_DIGEST" ]]
+      - name: Autenticar solo al publicador confiable
+        env: { GHCR_TOKEN: '${{ github.token }}' }
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$GHCR_TOKEN" | skopeo login --authfile "$RUNNER_TEMP/ghcr-auth.json" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+      - name: Publicar el OCI probado conservando todos sus digests
+        env: { EXPECTED_DIGEST: '${{ needs.test-image.outputs.digest }}' }
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$EXPECTED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          ref="ghcr.io/aculledor/cebo-de-pemento:sha-$GITHUB_SHA"
+          skopeo copy --all --preserve-digests --authfile "$RUNNER_TEMP/ghcr-auth.json" "oci-archive:$RUNNER_TEMP/tested/cebo.oci.tar" "docker://$ref"
+          skopeo inspect --authfile "$RUNNER_TEMP/ghcr-auth.json" --raw "docker://$ref" > "$RUNNER_TEMP/published-manifest.json"
+          actual="sha256:$(sha256sum "$RUNNER_TEMP/published-manifest.json" | cut -d' ' -f1)"
+          [[ "$actual" == "$EXPECTED_DIGEST" ]]
+          printf 'APP_IMAGE=%s@%s\n' "$ref" "$actual" > image.env
+          cat image.env >> "$GITHUB_STEP_SUMMARY"
+      - name: Borrar únicamente la credencial efímera del publicador
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/ghcr-auth.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: cebo-image-digest, path: image.env, retention-days: 90 }

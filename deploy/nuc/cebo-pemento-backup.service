@@ -8,6 +8,6 @@ Type=oneshot
 User=root
 Group=root
 ExecStart=/usr/local/sbin/cebo-pemento-deploy --backup
-TimeoutStartSec=600
+TimeoutStartSec=900
 Nice=15
 UMask=0077

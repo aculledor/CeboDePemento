@@ -1,5 +1,7 @@
 # Cebo de Pemento · v0.1.0
 
+**DEV/CI revisado:** [aislamiento, permisos mínimos, TLS offline restringido y bootstrap pendiente](deploy/dev/README.md). En PR solo validación sin publicación; el job separado de main reutiliza el OCI probado. No se habilitan candidatos del issue #3.
+
 Aplicación de pesca **online**, mobile first, en gallego y castellano. React/TypeScript/Vite, Fastify, SQLite y Drizzle. Incluye acceso por invitación, catálogo editable, fotografías, sesiones y lotes, propuestas para otro usuario, ligas simples/personalizadas, clasificaciones versionadas, estadísticas y mapa con zonas.
 
 El catálogo original conserva sus 932 entradas de referencia, 62 seleccionadas y 870 fuera de la selección inicial. No es un inventario verificado de fauna gallega. No se han inventado fotos, traducciones de nombres, tallas o coordenadas. No hay normativa, modo offline, cola de operaciones ni cuentas de demostración en la base de uso.
