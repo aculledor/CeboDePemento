@@ -50,11 +50,15 @@ class Diagnostics(unittest.TestCase):
             self.assertEqual(record['stage'],'api-read')
 
     def test_unknown_errors_and_forged_fields_cannot_interpolate_private_data(self):
+        class Unprintable:
+            def __str__(self):raise RuntimeError(SECRET)
         cases=[(ValueError(SECRET),'invalid-evidence'),(KeyError(SECRET),'evidence-shape'),
                (OSError(SECRET),'local-io'),(RuntimeError(SECRET),'internal-error'),
                (json.JSONDecodeError(SECRET,SECRET,0),'invalid-json'),
                (subprocess.TimeoutExpired([SECRET],1,output=SECRET,stderr=SECRET),'command-timeout'),
-               (Failure((SECRET,),SECRET),'internal-error')]
+               (Failure((SECRET,),SECRET),'internal-error'),
+               (Failure(('api-read',),{'private':SECRET}),'internal-error'),
+               (ValueError(Unprintable()),'invalid-evidence')]
         for error,code in cases:
             with self.subTest(code=code):self.assertEqual(self.record(error)['code'],code)
 

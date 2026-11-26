@@ -49,14 +49,13 @@ jobs:
 
 
         def reason(error):
-            if isinstance(error,Failure):return error.code if error.code in SAFE_CODES|HTTP_CODES else 'internal-error'
+            if isinstance(error,Failure):return error.code if type(error.code) is str and error.code in SAFE_CODES|HTTP_CODES else 'internal-error'
             if isinstance(error,json.JSONDecodeError):return 'invalid-json'
             if isinstance(error,subprocess.TimeoutExpired):return 'command-timeout'
             if isinstance(error,(KeyError,TypeError,IndexError)):return 'evidence-shape'
             if isinstance(error,OSError):return 'local-io'
             if type(error) is ValueError:
-                # Membership in a static allowlist, never exception interpolation.
-                value=str(error)
+                value=error.args[0] if len(error.args)==1 and type(error.args[0]) is str else None
                 return value if value in SAFE_CODES|HTTP_CODES else 'invalid-evidence'
             return 'internal-error'
 

@@ -131,9 +131,9 @@ SHA-256 ni SHA de main:
 
 | Fichero | Blob actual | Blob propuesto |
 | --- | --- | --- |
-| Portal `.github/workflows/portal-specops.yml` | `be84841ed312091b07129c526ffcb6ecfbd2c34c` | `fd111bdf93ecb5df8d2a74b50fa25d27f082b8c1` |
-| Cebo `.github/workflows/cebo-specops.yml` | `6676cef09635ea672da40ba69e13a9751fde9e98` | `a14a4cd72012efe0c388984105cec2b96538f204` |
-| Central `.github/workflows/specops-integrate.yml` | `f74c5bef9ead03587c05b548883a51fd08de8c83` | `9b8c86685e86115c3342795fe613aaefd36498ae` |
+| Portal `.github/workflows/portal-specops.yml` | `be84841ed312091b07129c526ffcb6ecfbd2c34c` | `8c453ca3f70f6623e4b96c19cdb8d2f835f72025` |
+| Cebo `.github/workflows/cebo-specops.yml` | `6676cef09635ea672da40ba69e13a9751fde9e98` | `a1b14a00b38a0fac5af2f46ce306afaeb3b3674f` |
+| Central `.github/workflows/specops-integrate.yml` | `f74c5bef9ead03587c05b548883a51fd08de8c83` | `7fca7b9c35ce3a097e08e99bf54b7d64a1b0cc8a` |
 
 1. Claude revisa código, YAML inline, separación verify/publish y evidencia real.
    Dirección acepta y fusiona las correcciones; este trabajo no retargeta/fusiona.
