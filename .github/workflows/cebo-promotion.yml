@@ -313,7 +313,9 @@ jobs:
             for ref in (pr['head']['sha'],pr['merge_commit_sha']):
                 value=api.request(control+'/contents/'+path+'?ref='+ref);docs.append(json.loads(base64.b64decode(value['content'])))
             require(docs[0]==docs[1] and docs[0]['promotion_pr']==pr['number'],'promotion-document')
-            doc=docs[0];c=candidate(doc['candidate'],cfg);require(identity(c)==doc['candidate_id'],'promotion-candidate')
+            doc=docs[0]
+            require(set(doc)=={'version','app','candidate','candidate_id','previous_image','dev_receipt','promotion_pr'} and type(doc['version']) is int and doc['version']==1 and doc['app']==cfg['app'] and type(doc['promotion_pr']) is int and HEX.fullmatch(doc['dev_receipt']),'promotion-format')
+            c=candidate(doc['candidate'],cfg);require(identity(c)==doc['candidate_id'],'promotion-candidate')
             rows=statuses(api,cfg['repository'],c['sha'],'specops/dev/'+cfg['app'])
             require(rows and rows[0]['state']=='success' and rows[0]['description']==doc['candidate_id']+':'+doc['dev_receipt'],'promotion-dev-receipt')
             provenance(api,cfg,c['source_run'],open_only=False)

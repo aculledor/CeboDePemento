@@ -116,7 +116,7 @@ class Delivery(unittest.TestCase):
   self.assertTrue(path.endswith('/pulls/7/merge'));self.assertEqual(method,'PUT');self.assertEqual(body['sha'],SHA);self.assertEqual(body['merge_method'],'merge')
   api.source['merged_at']='fixture';api.mutations=[];p.integrate(api,CFG,9);self.assertEqual(api.mutations,[])
  def test_gate_no_unauthorized_source_merge(self):
-  for mutate in [lambda a:a.promotion['merged_by'].update(id=99),lambda a:a.promotion.update(merged=False),lambda a:a.doc.update(promotion_pr=10),lambda a:a.doc.update(candidate_id='0'*64),lambda a:a.source['head'].update(sha='e'*40),lambda a:a.run.update(conclusion='failure')]:
+  for mutate in [lambda a:a.promotion['merged_by'].update(id=99),lambda a:a.promotion.update(merged=False),lambda a:a.doc.update(promotion_pr=10),lambda a:a.doc.update(version=2),lambda a:a.doc.update(app='other'),lambda a:a.doc.update(command='evil'),lambda a:a.doc.update(candidate_id='0'*64),lambda a:a.source['head'].update(sha='e'*40),lambda a:a.run.update(conclusion='failure')]:
    api=Fake();mutate(api)
    with self.assertRaises(ValueError):p.integrate(api,CFG,9)
    self.assertEqual(api.mutations,[])
