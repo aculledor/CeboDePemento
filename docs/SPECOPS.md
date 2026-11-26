@@ -1,0 +1,82 @@
+# SpecOps: CI/CD de candidatos y promoción única
+
+Implementa #3 sobre el árbol de PR #2 `f3b82157` (ya integrado por dirección en main `d2b5760f`; no se ha fusionado desde este trabajo). Contrato central: servidor-casa #34 `ba94a64`, ADR-004 por blob/retención90d y productores/extensión de recibo PROD de [servidor-casa #35](https://github.com/aculledor/servidor-casa/pull/35). No accede al NUC ni cambia ese PR. DEV y PROD residen permanentemente en el NUC una vez instalado el bootstrap revisado.
+
+## Push → DEV, sin permisos de publicación en código del PR
+
+CI mantiene `validate` y `test-image`: TypeScript, API, navegador, catálogo original, Compose, TLS renovado servido con CA anterior, presupuesto/cgroups, egress y backups/restauración. Checkout es head.sha exacto, acciones por SHA y `persist-credentials:false`, comprobación de credenciales antes de ejecutar npm/scripts. Solo contents:read; forks y autores ajenos no reciben secretos ni publicación/deploy. No hay runner doméstico.
+
+Un único build linux/amd64 produce `image.oci.tar`, labels de source/revision, SBOM/procedencia. Todos los smoke importan ese OCI, sin reconstruir. Solo PR interno de autor administrativo 45120213 (también draft) exporta `specops-cebo-build-v1/image.oci.tar`, 7 días: **insumo de construcción, no candidato**. Un push ordinario de main conserva publicación legacy por SHA en job de copia separado, nunca autoriza SpecOps PROD.
+
+`cebo-specops.yml` se ejecuta desde main auditado por workflow_run o nueva ejecución manual de recuperación con source_run vigente. Es autocontenido; la fuente generadora no se importa ni checkout en runtime privilegiado. Verifica repositorio interno, autor/actor administrativo, base main, PR abierto/head actual, CI final correcta más reciente, árbol Git, único artefacto y checksum API. Comprueba plataforma y labels OCI. Job read-only prueba exactamente ese digest mediante Docker registry loopback desechable: contenedor de aplicación network:none, sin capabilities ni secretos, límite de memoria/CPU/PIDs. Job independiente con packages:write vuelve a descargar/verificar el mismo artefacto/digest, solo copia OCI `--all --preserve-digests`, coteja digest remoto, publica `specops-candidate-v1/candidate.json` (90 días), elimina authfile. Nunca npm/Dockerfile/script mutable del PR con packages:write.
+
+Paquete candidato único **ghcr.io/aculledor/cebo-de-pemento-dev**, etiqueta interna candidate-RUN_ID; el motor consume solo digest. No usa tags del actualizador PROD legacy ni latest. Wire v1: version/app/repository/pr/sha/tree/image/digest/platform/source_run/publisher_run/publisher_attempt/tested_digest/migration/schema. ID es SHA256 de JSON canónico. publisher_attempt=1, tested_digest==digest, migration=none, schema0. Reintento tras fallo: nuevo workflow_dispatch, no rerun/attempt2. Repetir un run ya publicado conserva el primer candidato y omite otra publicación (evita IDs distintos por publisher_run); el historial se acota desde CI origen. La procedencia se vuelve a comprobar antes de emitir el candidato; un push más reciente invalida el viejo.
+
+## Una aprobación de release
+
+El motor aplica DEV automáticamente y solo tras salud publica recibo `specops/dev/cebo`. `cebo-promotion.yml` crea/actualiza propuesta en servidor-casa hacia **specops-promotions/cebo**, candidato/digest/recibo/baseline exactos, promotion_pr propio; cierra solo propuestas obsoletas propias. No acepta candidatos arbitrarios enviados por workflow input. Un GitHub App efímero nativo instalado en ambos repositorios prepara PRs (contents/pull requests write, actions/statuses read) y no figura como administrador aprobador.
+
+El administrador fusiona el PR dedicado de promoción: **la única aprobación ordinaria de release**. El integrador central (#35) verifica merger, rama/documento/recibo/CI y fusiona automáticamente source PR con merge normal y precondición de SHA. Si source seguía draft, lo marca ready automáticamente solo después de validar esa aprobación y checks; no requiere otra acción humana. No squash/rebase ni rebuild. El reconciliador vuelve a validar main/recibo/gate y hace preflight, backup WAL coherente, salud y rollback; comparte lock con backup diario. El root token de lectura no fusiona nada. La aprobación administrativa GitHub y su riesgo residual aceptado se conservan sin passkeys ni servicio de autorización adicional.
+
+El status **specops/prod/cebo** de #35 confirma el digest realmente sano tras aceptación o rollback, con token root statuses-write separado. La propuesta siguiente espera ese baseline; nunca supone éxito del anterior por estar mergeado el PR. Eventos status y schedule GitHub de recuperación cada5min reintentan idempotentemente preparación/integración tras una desconexión. No es un nuevo daemon del NUC. El motor conserva polling normal30s y backoff solo de fallos reales.
+
+## Scope, migraciones y compatibilidad
+
+`specops_delivery/cebo-scope.json` es la única fuente del scope tanto del productor inline como del generador de la sección source del perfil root. Incluye Dockerfile, .dockerignore, package.json/package-lock.json, tsconfig.base.json, apps/, packages/, catalogo.sqlite y workflows de CI/publicador. Archivos exactos, directorios con `/`, filename **y previous_filename**. Prueba CI analiza COPY/ADD y falla ante una entrada nueva no cubierta: no basta enumerar carpetas de código. Cambiar contexto/Dockerfile obliga a revisar alcance, no desplegar automáticamente root/Compose.
+
+**V1 no soporta evolución de migraciones Cebo.** SQLite runtime conserva PRAGMA user_version=0 mientras app_migrations lleva checksums. Para no afirmar compatibilidad solo por ese0, el productor rechaza cambios/renames en apps/api/migrations/ antes de publicación. Las migraciones existentes, chequeo de integridad, rechazo de modificar migración aplicada y restauración siguen probados por API/Docker smoke. Nuevas migraciones requieren contrato central revisado y pruebas de restauración antes de admitirlas. Esto protege datos y rollback sin añadir un motor de migración nuevo.
+
+Pruebas wire públicas no importan código privado; se inyecta Fake API sin tokens ni mutaciones reales. En #35, CI valida además candidatos de ambas apps con el **Candidate.parse real** del motor. La prueba hosted ejecuta el mismo inspect/test_digest del publicador contra registro local, nunca GHCR; la prueba OCI previa conserva también digests de atestaciones. No acredita ACL/login/publicación GHCR real, deliberadamente pendiente.
+
+## Bootstrap y transición (posterior a aceptación; no ejecutado)
+
+1. Aceptar motor #34 y productores #35/este PR con dirección y revisión Claude. Integrar código mediante flujo de implementación, sin confundirlo con una aprobación de release. Mantener flags desactivados durante transición.
+2. Seguir [DEV seguro](../deploy/dev/README.md): CA offline 1825d, hoja365d renovada misma CA, aviso30d desde ExecStartPre, slice compartida1152MiB/1,75CPU/512PIDs, guardias root preexistentes, red/volumen **cebo-pemento-dev** propios, restart:no recuperado por timer central. Conservar unidades y script de validación revisados fuera del checkout. No cambiar TLS, backups diarios, archivo de catálogo original ni IDs/volúmenes PROD.
+3. Pausar/enmascarar **los tres actualizadores legacy** según docs/specops/TRANSICION.md central (panel/portal/Cebo). Mantener backup diario con espera explícita del lock global; no volver a habilitar cebo-pemento-update.timer. Probar restauración y guardias antes del marcador root transition. Un merge a main sigue publicando la imagen legacy, pero ningún actualizador pausado debe consumirla.
+4. Instalar root local perfiles sellados DEV/PROD con IDs de workflow **reales** obtenidos de API (ci-ghcr.yml, cebo-specops.yml), publisher Git blob auditado (`git hash-object .github/workflows/cebo-specops.yml`), paths/volumen DB/fotos y digests reales. Generar sección source sin inventarIDs: `python3 -m specops_delivery.profile --app cebo --source-workflow ID_CI_REAL --publisher-workflow ID_PUBLISHER_REAL --required-workflows ID_CI_REAL --publisher-blob BLOB_AUDITADO --output /RUTA_PRIVADA_NUEVA/cebo-source.json`. El resultado se incorpora al perfil root; no se instala ni habilita desde el script. Revisar seals/compose_hash de instalación efectiva y el volumen real de SQLite/fotos; schema0 y migrationnone solo para las migraciones existentes comprobadas. Credenciales del NUC separadas read/statuses, root0600; ninguna en aplicación/Actions.
+5. En servidor-casa crear rama **specops-promotions/cebo desde main con integrador #35 revisado**. Archivo inicial releases/cebo.json: version1, appcebo, current_image=**digest PROD real actual**; nada de candidatos/PR/digests de fixture. El integrador closed/target usa el workflow de esa rama; si cambia el integrador, actualizar esa copia mediante mantenimiento revisado excepcional. No editar NUC después de cada merge ordinario de main.
+6. Configurar GitHub App (vars.SPECOPS_APP_ID y secrets.SPECOPS_APP_PRIVATE_KEY) en ambos repositorios, permisos mínimos anteriores y permiso de checks/status de solo lectura. Configurar **SPECOPS_REAL_PUBLICATION=enabled-after-acceptance** para publicación y **SPECOPS_RELEASE_AUTOMATION=enabled-after-acceptance** para preparar/integrar promociones, únicamente tras aceptación de dirección y transición local. El código requiere estos valores exactos y por defecto no hace nada. No se han configurado variables/secrets ni publicado candidatos.
+7. Primera publicación/DEV/PROD real se verifica en una sesión posteriormente autorizada, con evidencia de recibo/backups/salud/rollback. Entre pushes y promociones ordinarias no hay comandos, copias de configuración ni reconstrucciones.
+
+## Handoff Claude y rollback
+
+Revisar primero los permisos y el YAML inline, no solo el generador. Después provenance/artifact/OCItest, prepare_promotion/baseline/integrate (pruebas Fake API demuestran una aprobación y merge exacto, sin hacerlos), scope/freeze migraciones y compatibilidad con el parser central. `python3 -m specops_delivery.render cebo .` debe dejar Git limpio en los workflows. Ejecutar Python, TypeScript/API/build/Playwright y CI Docker real; no despachar el publicador real para probarlo.
+
+Rollback de automatización: desactivar flags de preparación/publicación y detener únicamente timers SpecOps propios si hace falta; conservar estado/evidencia root y volúmenes/backups. No reactivar legacy sin nuevo plan de transición y comparación del digest real; un main ordinario no sustituye autorización. No usar down/prune ni borrar datos. El rollback de aplicación pertenece al motor con backup probado y esquema compatible. La retirada de un PR de implementación no cambia NUC ni producción por sí misma.
+
+## Delta de revisión integrada — procedencia después del merge
+
+`producer.py`, `render.py`, `ci.py`, generador de perfiles y scopes son idénticos
+byte a byte a los de servidor-casa #35 corregido. ci.py coincide además con el
+motor #34. Los YAML se regeneran; runtime privilegiado sigue autocontenido.
+
+Publicación y DEV con PR abierto exigen asociación explícita. El reintento de
+integración usa el número del candidato y comprueba identidad/repos/base/autor,
+head SHA, workflow/run/actores/éxito y merged_at. Si necesita revalidar CI de PR
+fusionado con pull_requests vacío, exige created_at/run_started_at y los jobs
+del intento exacto completados antes del merge; updated_at mutable no basta.
+Una asociación explícita contradictoria o evidencia posterior se rechaza.
+
+El cron central valida primero aprobación vigente, documento/digest/recibo,
+identidad del source PR y tree. Fuente ya fusionada con SHA ancestro exacto de
+main termina sin otra mutación ni consultas repetidas de CI histórico. Un fallo
+de respuesta después de fusionar se confirma en el siguiente cron. Los tests de
+Cebo reproducen lista vacía real del run45736465426 y cron repetido sin merges
+adicionales; PR/SHA/repos/actores/workflow/fechas incorrectos fallan cerrado.
+
+En #35, esperar main-source-pending es Retry y no genera failure PROD. Solo un
+rollback real con cuarentena, candidato exacto, imagen anterior coincidente y
+salud confirmada permite publicar failure. La propuesta siguiente espera un
+recibo terminal real, sin adivinar baseline durante integración.
+
+**Riesgo residual SQL:** congelar apps/api/migrations/ no detecta DDL/SQL directo
+en otros módulos. user_version=0 y migration=none no prueban ausencia de cambios
+de esquema. Revisar explícitamente database.ts y escrituras DDL; todo cambio de
+esquema debe declararse y detener publicación hasta acordar compatibilidad y
+restauración con el contrato. No se añade parser ni servicio para fingir cubrir
+ese riesgo. El DEV/TLS aceptado no cambia.
+
+La pausa/enmascarado de actualizadores legacy panel/portal/Cebo y conservación
+del backup diario sigue siendo un gate local obligatorio antes de activar
+SPECOPS_RELEASE_AUTOMATION; aún no comprobado en el NUC. Esta corrección no lo
+activa ni publica candidatos reales. Claude revisa únicamente este delta.

@@ -86,7 +86,7 @@ class WorkflowSafety(unittest.TestCase):
         self.assertLess(names.index("Validar OCI antes de autenticar o escribir en el registro"),
                         names.index("Autenticar solo al publicador confiable"))
 
-    def test_prs_have_no_publishable_oci_artifact_or_candidate_channel(self):
+    def test_prs_export_internal_build_input_without_credentials_or_candidate_publication(self):
         image = self.workflow["jobs"]["test-image"]
         exports = [s for s in image["steps"] if s.get("with", {}).get("name") == "cebo-tested-oci"]
         self.assertEqual(len(exports), 1)
@@ -97,6 +97,11 @@ class WorkflowSafety(unittest.TestCase):
                 self.assertNotIn("GITHUB_TOKEN", step.get("env", {}))
                 self.assertNotIn("GHCR_TOKEN", step.get("env", {}))
                 self.assertNotIn("github.token", json.dumps(step))
+        candidate_inputs=[s for s in image['steps'] if s.get('with',{}).get('name')=='specops-cebo-build-v1']
+        self.assertEqual(len(candidate_inputs),1)
+        self.assertIn('head.repo.full_name == github.repository',candidate_inputs[0]['if'])
+        self.assertIn('user.id == 45120213',candidate_inputs[0]['if'])
+        self.assertEqual(candidate_inputs[0]['with']['retention-days'],7)
         self.assertNotIn("specops-candidate-v1", json.dumps(self.workflow))
 
 

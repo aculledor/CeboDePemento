@@ -1,0 +1,1 @@
+["Dockerfile", ".dockerignore", "package.json", "package-lock.json", "tsconfig.base.json", "apps/", "packages/", "catalogo.sqlite", ".github/workflows/ci-ghcr.yml", ".github/workflows/cebo-specops.yml"]

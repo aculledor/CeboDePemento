@@ -1,3 +1,5 @@
+**SpecOps #3 (preparado, no activado):** [productor, aprobación única y transición](SPECOPS.md). Los procedimientos legacy de abajo son históricos para instalaciones sin SpecOps; no reactivar su actualizador tras la transición.
+
 # Instalación y operación en nuc-cas
 
 Preparado para **Ubuntu Server 24.04, AMD64, Intel i5-5300U, 8 GB RAM y Docker Compose v2**. No se ha accedido por SSH ni desplegado en el NUC. Los comandos de instalación se ejecutan allí **después de revisar y fusionar el PR y autorizar la instalación**.
