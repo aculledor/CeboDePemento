@@ -14,10 +14,15 @@ import urllib.error
 import urllib.parse
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from specops_delivery import producer as p
+from types import ModuleType
+from specops_delivery.bundle import bundle
 from specops_delivery.render import CONFIGS
 
 APP='portal' if (Path(__file__).resolve().parents[1]/'apps/portal').exists() else 'cebo'
+# Execute exactly the generated verify code, not the complete source module.
+p=ModuleType('specops_verify_inline')
+exec(compile(bundle(CONFIGS[APP],'verify'),'<generated-verify>','exec'),p.__dict__)
+
 SOURCE={'portal':45903242249,'cebo':45903253447}
 CURRENT='startup'
 HTTP=frozenset((200,201,204,301,302,303,304,307,308,400,401,403,404,408,410,422,429,500,502,503,504))

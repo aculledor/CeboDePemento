@@ -131,9 +131,9 @@ SHA-256 ni SHA de main:
 
 | Fichero | Blob actual | Blob propuesto |
 | --- | --- | --- |
-| Portal `.github/workflows/portal-specops.yml` | `be84841ed312091b07129c526ffcb6ecfbd2c34c` | `8c453ca3f70f6623e4b96c19cdb8d2f835f72025` |
-| Cebo `.github/workflows/cebo-specops.yml` | `6676cef09635ea672da40ba69e13a9751fde9e98` | `a1b14a00b38a0fac5af2f46ce306afaeb3b3674f` |
-| Central `.github/workflows/specops-integrate.yml` | `f74c5bef9ead03587c05b548883a51fd08de8c83` | `7fca7b9c35ce3a097e08e99bf54b7d64a1b0cc8a` |
+| Portal `.github/workflows/portal-specops.yml` | `be84841ed312091b07129c526ffcb6ecfbd2c34c` | `0776125b109c42732c14152486677c613dbafb04` |
+| Cebo `.github/workflows/cebo-specops.yml` | `6676cef09635ea672da40ba69e13a9751fde9e98` | `5c5eac3fc1ef6700dde71aa34295ed0fc4aa3fcb` |
+| Central `.github/workflows/specops-integrate.yml` | `f74c5bef9ead03587c05b548883a51fd08de8c83` | `3d323777cf4b771dc1c2f486f139f8f3808b053e` |
 
 1. Claude revisa código, YAML inline, separación verify/publish y evidencia real.
    Dirección acepta y fusiona las correcciones; este trabajo no retargeta/fusiona.
@@ -182,3 +182,9 @@ git hash-object .github/workflows/cebo-specops.yml
 Si los blobs cambian durante revisión, recalcular esta tabla antes de aceptar.
 El rollback de código/allowlist requiere revisión del contenido anterior y conservar
 la evidencia aceptada; no reactivar updaters legacy, borrar datos ni tocar PROD.
+
+## P2 de mantenimiento: presupuesto del publicador
+
+[Reducción por modo, tamaños, regresión y blobs finales](SPECOPS_WORKFLOW_BUDGET.md).
+El presupuesto de generación es 96 KiB; el límite de seguridad root sigue en
+128 KiB. Los readback de esta revisión ejecutan el bundle verify generado.
