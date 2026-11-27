@@ -80,3 +80,9 @@ La pausa/enmascarado de actualizadores legacy panel/portal/Cebo y conservación
 del backup diario sigue siendo un gate local obligatorio antes de activar
 SPECOPS_RELEASE_AUTOMATION; aún no comprobado en el NUC. Esta corrección no lo
 activa ni publica candidatos reales. Claude revisa únicamente este delta.
+
+## Incidente de verify real (#40)
+
+[Diagnóstico acreditado, corrección de auth loopback y coordinación de blobs/bases](SPECOPS_VERIFY_BOOTSTRAP.md).
+Los PR de corrección no publican candidatos ni modifican NUC/PROD. Conservar los
+PR iniciales de bootstrap abiertos y coordinar sus nuevas cabezas/CI con dirección.
