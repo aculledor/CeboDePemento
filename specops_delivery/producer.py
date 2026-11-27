@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from .ci import ci_association, ci_before_merge, ci_time
+from .diagnostics import diagnostic, diagnostic_record, stage
 
 CONFIG = {}
 SHA=re.compile(r'[a-f0-9]{40}\Z')
@@ -78,6 +79,7 @@ class API:
                 if attempt==3:raise ValueError('github-unavailable') from None
                 time.sleep(2**attempt)
         raise ValueError('artifact-redirects')
+    @diagnostic('api-read')
     def request(self,path,method='GET',body=None):
         require(path.startswith('/repos/') or path=='/graphql','api-path')
         require(all(p not in ('.','..') for p in urllib.parse.unquote(urllib.parse.urlsplit(path).path).split('/')),'api-path')
@@ -93,6 +95,7 @@ class API:
             if minimum_id and any(row['id']<minimum_id for row in rows):return result
             if len(rows)<100:return result
         raise ValueError('api-pagination-limit')
+    @diagnostic('artifact-download')
     def archive(self,repo,artifact,destination):
         require(DIGEST.fullmatch(artifact['digest']) and artifact['size_in_bytes']<=768*1024**2,'artifact-size-or-checksum')
         path=Path(destination)
@@ -100,7 +103,8 @@ class API:
             digest=hashlib.sha256();size=0
             while chunk:=response.read(1024*1024):
                 size+=len(chunk);require(size<=768*1024**2,'artifact-size');digest.update(chunk);output.write(chunk)
-        require('sha256:'+digest.hexdigest()==artifact['digest'],'artifact-checksum')
+        with stage('artifact-checksum'):
+            require('sha256:'+digest.hexdigest()==artifact['digest'],'artifact-checksum')
         return path
 
 
@@ -125,6 +129,7 @@ def check_ci(api,cfg,run,pr,number,workflow_id,path,open_only):
         ci_before_merge(run,pr,jobs)
 
 
+@diagnostic('provenance')
 def provenance(api,cfg,run_id,open_only=True,pr_number=None):
     repo='/repos/'+cfg['repository'];run=api.request(repo+f'/actions/runs/{int(run_id)}')
     require(run['id']==int(run_id),'source-run-id')
@@ -144,12 +149,14 @@ def provenance(api,cfg,run_id,open_only=True,pr_number=None):
     return {'sha':run['head_sha'],'tree':tree,'pr':pr['number'],'source_run':run['id']}
 
 
+@diagnostic('artifact-metadata')
 def build_artifact(api,cfg,run_id):
     artifacts=api.pages('/repos/'+cfg['repository']+f'/actions/runs/{int(run_id)}/artifacts','artifacts')
     matches=[a for a in artifacts if a['name']==cfg['build_artifact'] and not a['expired']]
     require(len(matches)==1,'build-artifact-ambiguous');return matches[0]
 
 
+@diagnostic('artifact-extract')
 def extract_build(archive,work):
     with zipfile.ZipFile(archive) as z:
         require(z.namelist()==['image.oci.tar'],'build-artifact-members')
@@ -159,17 +166,21 @@ def extract_build(archive,work):
     return path
 
 
-def run(args, raw=False):
-    result=subprocess.run(args,capture_output=True,text=True,timeout=300,env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','HOME':os.environ.get('HOME','/root'),'LANG':'C.UTF-8'})
-    require(result.returncode==0,'command-failed')
-    return result.stdout if raw else result.stdout.strip()
+def run(args, raw=False, step='local-command'):
+    with stage(step):
+        result=subprocess.run(args,capture_output=True,text=True,timeout=300,env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','HOME':os.environ.get('HOME','/root'),'LANG':'C.UTF-8'})
+        if result.returncode and 'auth.json' in result.stderr and 'permission denied' in result.stderr.lower():
+            raise ValueError('credential-file-permission')
+        require(result.returncode==0,'command-failed')
+        return result.stdout if raw else result.stdout.strip()
 
 
+@diagnostic('oci-inspect')
 def inspect_oci(path,cfg,sha):
-    raw=run(['skopeo','inspect','--raw','oci-archive:'+str(path)], raw=True)
+    raw=run(['skopeo','inspect','--raw','oci-archive:'+str(path)], raw=True,step='oci-index')
     index=json.loads(raw);manifests=index.get('manifests',[])
     require(sum(m.get('platform',{}).get('os')=='linux' and m.get('platform',{}).get('architecture')=='amd64' for m in manifests)==1,'oci-platform')
-    info=json.loads(run(['skopeo','inspect','--override-os','linux','--override-arch','amd64','--config','oci-archive:'+str(path)]))
+    info=json.loads(run(['skopeo','inspect','--override-os','linux','--override-arch','amd64','--config','oci-archive:'+str(path)],step='oci-config'))
     require(info['os']=='linux' and info['architecture']=='amd64' and info['config']['Labels']['org.opencontainers.image.revision']==sha and info['config']['Labels']['org.opencontainers.image.source']=='https://github.com/'+cfg['repository'],'oci-provenance')
     return 'sha256:'+hashlib.sha256(raw.encode()).hexdigest()
 
@@ -180,34 +191,39 @@ def runtime_fixture(cfg):
     return {'origin':origin,'gatewaySecret':'a'*64,'publicOrigins':{'navidrome':'https://portal-fixture.invalid:18545','jellyfin':'https://portal-fixture.invalid:18546'},'oidc':{'issuer':'https://identity-fixture.invalid/application/o/fixture/','clientId':'fixture','clientSecret':'c'*48},'identity':{'apiOrigin':'https://identity-fixture.invalid','apiToken':'d'*48,'manageAccess':False,'enrollment':{},'recoveryPath':'/if/flow/fixture/'},'groups':{'admin':['requests'],'familiar':['requests'],'invitado':['requests']},'mappings':{},'seerr':{'baseUrl':'http://seerr:5055','apiKey':'synthetic-fixture-only','mode':'read','contractVerified':False},'navidrome':{'enabled':False,'baseUrl':'http://navidrome:4533'},'jellyfin':{'enabled':False,'baseUrl':'http://192.168.1.145:8096'}}
 
 
+@diagnostic('runtime-test')
 def test_digest(path,cfg,digest,work):
     require(os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted' and not os.environ.get('DOCKER_HOST') and os.uname().nodename!='nuc-cas','hosted-fixture-only')
     suffix=str(os.getpid());registry='specops-registry-'+suffix;app='specops-app-'+suffix
+    # Anonymous loopback only. Never discover runner/root credentials implicitly.
+    auth=Path(work)/'loopback-auth.json'
+    with auth.open('x') as file:
+        os.fchmod(file.fileno(),0o600);file.write('{"auths":{}}')
     try:
-        run(['docker','run','-d','--name',registry,'--memory','512m','--tmpfs','/var/lib/registry:rw,size=768m','-p','127.0.0.1::5000','registry:2.8.3'])
-        endpoint=run(['docker','port',registry,'5000/tcp']);require(re.fullmatch(r'127\.0\.0\.1:[0-9]+',endpoint),'registry-loopback')
+        run(['docker','run','-d','--name',registry,'--memory','512m','--tmpfs','/var/lib/registry:rw,size=768m','-p','127.0.0.1::5000','registry:2.8.3'],step='registry-start')
+        endpoint=run(['docker','port',registry,'5000/tcp'],step='registry-port');require(re.fullmatch(r'127\.0\.0\.1:[0-9]+',endpoint),'registry-loopback')
         for _ in range(40):
             try:urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://'+endpoint+'/v2/',timeout=1).close();break
             except OSError:time.sleep(.25)
         ref=endpoint+'/specops-fixture@'+digest
-        run(['skopeo','copy','--all','--preserve-digests','--dest-tls-verify=false','oci-archive:'+str(path),'docker://'+endpoint+'/specops-fixture:tested'])
-        remote=run(['skopeo','inspect','--raw','--tls-verify=false','docker://'+endpoint+'/specops-fixture:tested'], raw=True)
+        run(['skopeo','copy','--authfile',str(auth),'--all','--preserve-digests','--dest-tls-verify=false','oci-archive:'+str(path),'docker://'+endpoint+'/specops-fixture:tested'],step='registry-copy')
+        remote=run(['skopeo','inspect','--authfile',str(auth),'--raw','--tls-verify=false','docker://'+endpoint+'/specops-fixture:tested'], raw=True,step='registry-inspect')
         require('sha256:'+hashlib.sha256(remote.encode()).hexdigest()==digest,'registry-rewrote-digest')
-        run(['docker','pull','--platform','linux/amd64',ref])
+        run(['docker','pull','--platform','linux/amd64',ref],step='runtime-pull')
         args=['docker','run','-d','--name',app,'--network','none','--read-only','--user','1000:1000','--cap-drop','ALL','--security-opt','no-new-privileges','--memory','512m','--memory-swap','512m','--cpus','.5','--pids-limit','128','--tmpfs','/tmp:uid=1000,gid=1000,size=16m']
         fixture=runtime_fixture(cfg)
         if fixture:
             file=Path(work)/'fixture.json';file.write_text(json.dumps(fixture));file.chmod(0o644)
             args+=['--tmpfs','/data:uid=1000,gid=1000,size=32m','-e','PORTAL_CONFIG=/fixture.json','-e','PORTAL_DATA_DIR=/data','-v',str(file)+':/fixture.json:ro']
         else:args+=['--tmpfs','/app/data:uid=1000,gid=1000,size=64m','-e','APP_ORIGINS=https://fixture.invalid','-e','BACKUP_INTERVAL_HOURS=0']
-        run(args+[ref])
+        run(args+[ref],step='runtime-start')
         for attempt in range(60):
             try:
-                run(['docker','exec',app,'node','-e',f"fetch('http://127.0.0.1:{cfg['port']}{cfg['health']}').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]);break
+                run(['docker','exec',app,'node','-e',f"fetch('http://127.0.0.1:{cfg['port']}{cfg['health']}').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"],step='runtime-health');break
             except ValueError:
                 if attempt==59:raise
                 time.sleep(1)
-        info=json.loads(run(['docker','image','inspect',ref]))[0]
+        info=json.loads(run(['docker','image','inspect',ref],step='runtime-identity'))[0]
         require(ref in info['RepoDigests'] and info['Os']=='linux' and info['Architecture']=='amd64','tested-image-identity')
         print('Exact OCI index tested via loopback digest; no credentials in the application runner.')
     finally:
@@ -222,6 +238,7 @@ def fetch_build(api,cfg,run_id,work):
     return meta,path
 
 
+@diagnostic('candidate-bind')
 def make_candidate(cfg,meta,publisher_run,attempt):
     return candidate({'version':1,'app':cfg['app'],'repository':cfg['repository'],'pr':meta['pr'],'sha':meta['sha'],'tree':meta['tree'],'image':cfg['image'],'digest':meta['digest'],'platform':'linux/amd64','source_run':meta['source_run'],'publisher_run':int(publisher_run),'publisher_attempt':int(attempt),'tested_digest':meta['digest'],'migration':'none','schema':cfg['schema']},cfg)
 
@@ -268,6 +285,7 @@ def publisher_candidates(api,cfg,minimum_id=0):
         yield c
 
 
+@diagnostic('candidate-discovery')
 def already_published(api,cfg,meta):
     for c in publisher_candidates(api,cfg,minimum_id=meta['source_run']):
         if c['source_run']==meta['source_run'] and c['sha']==meta['sha']:
@@ -276,6 +294,7 @@ def already_published(api,cfg,meta):
     return False
 
 
+@diagnostic('candidate-discovery')
 def trusted_candidate(api,cfg,sha,candidate_id):
     source=api.request('/repos/'+cfg['repository']+'/actions/workflows/'+cfg['source_path'].rsplit('/',1)[-1])
     runs=api.pages('/repos/'+cfg['repository']+f'/actions/workflows/{source["id"]}/runs?head_sha={sha}&event=pull_request','workflow_runs')
@@ -286,6 +305,7 @@ def trusted_candidate(api,cfg,sha,candidate_id):
     raise ValueError('candidate-evidence-absent')
 
 
+@diagnostic('promotion-prepare')
 def prepare_promotion(api,cfg,sha,description):
     require(re.fullmatch(r'[a-f0-9]{64}:[a-f0-9]{64}',description),'dev-receipt-format')
     candidate_id,receipt_hash=description.split(':');c=trusted_candidate(api,cfg,sha,candidate_id)
@@ -322,6 +342,7 @@ def prepare_promotion(api,cfg,sha,description):
     return doc
 
 
+@diagnostic('source-integration')
 def integrate(api,cfg,number):
     control='/repos/'+CONTROL;pr=api.request(control+f'/pulls/{int(number)}')
     target='specops-promotions/'+cfg['app']
@@ -379,6 +400,7 @@ def output(values):
             require(re.fullmatch(r'[a-z_]+',key) and '\n' not in str(value) and '\r' not in str(value),'output-format');file.write(key+'='+str(value)+'\n')
 
 
+@diagnostic('event-validation')
 def main():
     cfg=CONFIG;mode=os.environ['SPECOPS_MODE'];api=API(os.environ['GH_TOKEN'])
     require(os.environ['GITHUB_REPOSITORY']==cfg['repository'] if mode not in ('integrate',) else os.environ['GITHUB_REPOSITORY']==CONTROL,'workflow-repository')
@@ -429,6 +451,6 @@ def main():
 
 if __name__=='__main__':
     try:main()
-    except Exception:
-        print('SpecOps producer rejected stale, unauthorized or invalid evidence; no sensitive diagnostics.')
+    except Exception as error:
+        print(json.dumps(diagnostic_record(error),sort_keys=True))
         raise SystemExit(1)
