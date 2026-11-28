@@ -47,7 +47,8 @@ No se exige un status remoto listo: una espera de candidato o caída de GitHub n
 impide respaldar la versión local coherente y sana. Tras rollback, current y el
 registro image vuelven a la imagen anterior; la metadata OCI identifica esa
 versión, aunque el diario retenga campos históricos. Antes de la primera promoción
-se acepta el baseline con perfil instalado, current nulo y sin image record. Sin
+se acepta el baseline con perfil instalado y current nulo: image record puede no
+existir o contener el mismo baseline tras una recuperación local del motor. Sin
 ningún registro SpecOps se exige la coincidencia exacta del baseline legacy.
 La presencia del perfil no requiere activar el reconciliador para hacer backup.
 

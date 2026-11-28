@@ -213,7 +213,8 @@ def backup_state(ref, revision, legacy, config, mountpoint, database, photos):
     backup_require("pending" in state and state["pending"] is None, "specops-pending-transaction")
     backup_require("current" in state and
                    (state["current"] if state["current"] is not None else legacy) == ref, "specops-current-drift")
-    backup_require(state["current"] is not None or (image is None and ref == legacy), "specops-current-missing")
+    # Engine uses host.current() before first acceptance. Local baseline recovery
+    # may have persisted its image record while journal.current is still None.
     candidate = state.get("accepted_candidate")
     backup_require(candidate is None or isinstance(candidate, dict), "specops-candidate-format")
     if DEV_REF_RE.fullmatch(ref):

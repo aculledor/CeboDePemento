@@ -198,6 +198,8 @@ class ActiveBackupTests(unittest.TestCase):
         self.assertEqual(d.active_backup()["image"], LEGACY)
         (f.state / "cebo-prod.json").unlink()
         self.assertEqual(d.active_backup()["specops"]["mode"], "specops-baseline")
+        f.install_specops(LEGACY, current=False, image=True)
+        self.assertEqual(d.active_backup()["image"], LEGACY)
 
     def test_promoted_digest_and_rollback_to_prior_dev_or_legacy(self):
         f = self.fixture()
