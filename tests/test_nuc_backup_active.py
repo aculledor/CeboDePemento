@@ -322,6 +322,10 @@ class ActiveBackupTests(unittest.TestCase):
     def test_legacy_installation_without_uploaded_photos_remains_supported(self):
         f = self.fixture(); shutil.rmtree(f.volume / "photos")
         self.assertEqual(d.active_backup()["image"], LEGACY)
+        f.install_specops(LEGACY, current=False, image=False)
+        self.assertEqual(d.active_backup()["image"], LEGACY)
+        f.install_specops(LEGACY, current=False, image=True)
+        self.assertEqual(d.active_backup()["image"], LEGACY)
 
     def test_backup_export_restore_metadata_and_no_production_mutations(self):
         f = self.fixture(); f.install_specops(); before = (f.project / "image.env").read_bytes()

@@ -309,7 +309,8 @@ def inspect_active_backup():
     # openDatabase() can initialize a missing DB: never let a scheduled backup
     # silently archive a newly seeded database instead of the live dataset.
     backup_require((data / database).is_file(), "database-missing")
-    backup_require((data / photos).is_dir() if present(data / photos) or proof["mode"] != "legacy" else True,
+    photos_required = proof.get("current") is not None
+    backup_require((data / photos).is_dir() if present(data / photos) or photos_required else True,
                    "photos-missing-or-type")
     return {"image": ref, "revision": revision, "container_id": ids[0], "image_id": image["Id"],
             "volume": volume["name"], "database": str(database), "photos": str(photos), "specops": proof}

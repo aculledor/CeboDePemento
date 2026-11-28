@@ -30,7 +30,9 @@ Dentro del lock, antes de ejecutar el snapshot:
    coincidente. Contrasta DATABASE_PATH/PHOTO_DIRECTORY con el contenedor. Rechaza
    build, otros montajes persistentes y rutas fuera de data/. La DB debe existir:
    no deja que la CLI inicialice un catálogo nuevo por pérdida de la base. Rechaza
-   enlaces en las rutas de datos. Legacy sin fotos todavía sigue admitido.
+   enlaces en las rutas de datos. Antes de la primera aceptación, el directorio
+   de fotos aún puede faltar como permite el backup legacy; tras promoción o
+   rollback registrado debe conservarse el directorio ya verificado por el motor.
 4. Si existe cualquier registro Cebo PROD de SpecOps, exige perfil root privado
    `/etc/servidor-casa/specops/cebo-prod.json`, seals y compose_hash efectivos,
    baseline legacy y rutas DB/fotos correspondientes al volumen inspeccionado.
