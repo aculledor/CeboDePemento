@@ -1,5 +1,10 @@
 **SpecOps #3 (preparado, no activado):** [productor, aprobación única y transición](SPECOPS.md). Los procedimientos legacy de abajo son históricos para instalaciones sin SpecOps; no reactivar su actualizador tras la transición.
 
+**Backup diario tras promoción SpecOps (#8):** [selección del digest realmente
+activo, metadata de recuperación, instalación root revisada y pruebas](SPECOPS_BACKUP.md).
+El backup conserva el lock/espera de 300 s y timeout de 900 s; genera el image.env
+restaurable dentro de la copia, sin modificar el baseline sellado de producción.
+
 # Instalación y operación en nuc-cas
 
 Preparado para **Ubuntu Server 24.04, AMD64, Intel i5-5300U, 8 GB RAM y Docker Compose v2**. No se ha accedido por SSH ni desplegado en el NUC. Los comandos de instalación se ejecutan allí **después de revisar y fusionar el PR y autorizar la instalación**.

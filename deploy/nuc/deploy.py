@@ -7,11 +7,13 @@ Compose, Caddyfile, env, script and units remain local and require manual update
 import argparse
 import datetime as dt
 import fcntl
+import hashlib
 import ipaddress
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -26,6 +28,10 @@ IMAGE_REPO = "ghcr.io/aculledor/cebo-de-pemento"
 REF_RE = re.compile(r"^ghcr\.io/aculledor/cebo-de-pemento:sha-([0-9a-f]{40})@sha256:[0-9a-f]{64}$")
 DIGEST_RE = re.compile(r"^ghcr\.io/aculledor/cebo-de-pemento@sha256:[0-9a-f]{64}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SPECOPS_ROOT = Path("/etc/servidor-casa/specops")
+SPECOPS_STATE = Path("/var/lib/servidor-specops")
+GLOBAL_LOCK = Path("/run/lock/servidor-casa-deploy.lock")
+DEV_REF_RE = re.compile(r"^ghcr\.io/aculledor/cebo-de-pemento-dev@sha256:[0-9a-f]{64}$")
 
 
 class DeployError(Exception):
@@ -127,15 +133,200 @@ def pinned_image(sha, inspect):
     return f"{IMAGE_REPO}:sha-{sha}@{digests.pop().split('@')[1]}"
 
 
-def backup(old_image):
+def backup_require(condition, code):
+    if not condition:
+        raise DeployError("Backup rechazado: " + code)
+
+
+def json_object(content):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            backup_require(key not in result, "duplicate-json-key")
+            result[key] = value
+        return result
+    value = json.loads(content, object_pairs_hook=pairs,
+                       parse_constant=lambda _: backup_require(False, "invalid-json-number"))
+    backup_require(isinstance(value, dict), "json-object")
+    return value
+
+
+def fingerprint(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+
+
+def private_record(path):
+    # State/profile are root-local data, never imported code from either checkout.
+    for parent in reversed(path.parents):
+        trusted(parent)
+    trusted(path, True)
+    backup_require(stat.S_ISREG(path.lstat().st_mode), "state-file-type")
+    return json_object(path.read_text())
+
+
+def present(path):
+    return path.exists() or path.is_symlink()
+
+
+def data_relative(value):
+    path = PurePosixPath(value)
+    backup_require(not path.is_absolute() and path.parts[:1] == ("data",) and
+                   len(path.parts) > 1 and ".." not in path.parts and "\\" not in value,
+                   "data-path")
+    return path.relative_to("data")
+
+
+def backup_state(ref, revision, legacy, config, mountpoint, database, photos):
+    profile_path = SPECOPS_ROOT / "cebo-prod.json"
+    image_path = SPECOPS_STATE / "cebo-prod-image.json"
+    journal_path = SPECOPS_STATE / "cebo-prod.json"
+    if not any(present(p) for p in (profile_path, image_path, journal_path)):
+        backup_require(ref == legacy, "legacy-image-drift")
+        return {"mode": "legacy"}
+    backup_require(present(profile_path), "specops-profile-missing")
+    profile = private_record(profile_path)
+    expected = {"version": 1, "app": "cebo", "environment": "prod",
+                "directory": str(PROJECT), "project": "cebo-pemento", "service": "app",
+                "compose": str(PROJECT / "compose.yaml"), "env_file": str(PROJECT / ".env"),
+                "image_variable": "APP_IMAGE", "baseline_image": legacy}
+    backup_require(all(profile.get(k) == v for k, v in expected.items()), "specops-profile-target")
+    seals = profile["seals"]
+    backup_require({str(PROJECT / "compose.yaml"), str(PROJECT / ".env")} <= set(seals), "specops-seals")
+    for filename, digest in seals.items():
+        path = Path(filename)
+        trusted(path, path.name in (".env", "image.env"))
+        backup_require(hashlib.sha256(path.read_bytes()).hexdigest() == digest, "specops-seal-drift")
+    normalized = json.loads(json.dumps(config))
+    normalized["services"]["app"]["image"] = "SPECOPS_IMAGE"
+    backup_require(fingerprint(normalized) == profile["compose_hash"], "specops-compose-drift")
+    backup_require(profile["database"] == str(Path(mountpoint) / database) and
+                   profile.get("photos") == str(Path(mountpoint) / photos), "specops-data-drift")
+    image = private_record(image_path) if present(image_path) else None
+    if image is not None:
+        backup_require(set(image) == {"image"} and image["image"] == ref, "specops-image-drift")
+    else:
+        backup_require(ref == legacy, "specops-image-missing")
+    if not present(journal_path):
+        backup_require(image is None and ref == legacy, "specops-journal-missing")
+        return {"mode": "specops-baseline", "profile_hash": fingerprint(profile)}
+    state = private_record(journal_path)
+    backup_require("pending" in state and state["pending"] is None, "specops-pending-transaction")
+    backup_require("current" in state and
+                   (state["current"] if state["current"] is not None else legacy) == ref, "specops-current-drift")
+    backup_require(state["current"] is not None or (image is None and ref == legacy), "specops-current-missing")
+    candidate = state.get("accepted_candidate")
+    backup_require(candidate is None or isinstance(candidate, dict), "specops-candidate-format")
+    if DEV_REF_RE.fullmatch(ref):
+        backup_require(isinstance(candidate, dict) and candidate.get("app") == "cebo" and
+                       candidate.get("repository") == "aculledor/CeboDePemento" and
+                       isinstance(candidate.get("image"), str) and isinstance(candidate.get("digest"), str) and
+                       candidate.get("image") + "@" + candidate.get("digest") == ref and
+                       candidate.get("tested_digest") == candidate.get("digest") and
+                       candidate.get("sha") == revision and candidate.get("platform") == "linux/amd64" and
+                       fingerprint(candidate) == state.get("candidate_id"), "specops-candidate-drift")
+    # Rollback deliberately leaves historical sha/digest/selected_candidate fields.
+    # current + image record describe the live version; never use historical fields.
+    return {"mode": "specops", "profile_hash": fingerprint(profile), "current": state["current"],
+            "candidate_id": state.get("candidate_id") if candidate and
+            candidate.get("image", "") + "@" + candidate.get("digest", "") == ref else None}
+
+
+def active_backup():
+    """Read-only selection under the global lock, before any snapshot/helper."""
+    try:
+        return inspect_active_backup()
+    except (ValueError, KeyError, TypeError, IndexError) as error:
+        raise DeployError("Backup rechazado: invalid-local-evidence") from error
+
+
+def inspect_active_backup():
+    image_env = env_values((PROJECT / "image.env").read_text())
+    backup_require(set(image_env) == {"APP_IMAGE"} and REF_RE.fullmatch(image_env["APP_IMAGE"]), "legacy-image-env")
+    ids = compose("ps", "--all", "--quiet", "app", timeout=30).split()
+    backup_require(len(ids) == 1 and re.fullmatch(r"[0-9a-f]{64}", ids[0]), "container-identity")
+    container = json.loads(run("/usr/bin/docker", "inspect", ids[0], timeout=30))
+    backup_require(len(container) == 1 and container[0]["Id"] == ids[0], "container-identity")
+    container = container[0]
+    labels = container["Config"]["Labels"]
+    backup_require(labels.get("com.docker.compose.project") == "cebo-pemento" and
+                   labels.get("com.docker.compose.service") == "app" and
+                   labels.get("com.docker.compose.oneoff") == "False" and
+                   labels.get("com.docker.compose.project.working_dir") == str(PROJECT), "container-labels")
+    state = container["State"]
+    backup_require(state.get("Running") is True and not state.get("Paused") and not state.get("Restarting") and
+                   state.get("Health", {}).get("Status") == "healthy", "container-health")
+    ref = container["Config"]["Image"]
+    backup_require(REF_RE.fullmatch(ref) or DEV_REF_RE.fullmatch(ref), "image-reference")
+    image = json.loads(run("/usr/bin/docker", "image", "inspect", ref, timeout=30))
+    backup_require(len(image) == 1, "image-identity")
+    image = image[0]
+    revision = image["Config"]["Labels"].get("org.opencontainers.image.revision", "")
+    repository = ref.split("@", 1)[0].split(":", 1)[0]
+    backup_require(re.fullmatch(r"sha256:[0-9a-f]{64}", image["Id"]) and
+                   image["Id"] == container["Image"] and image.get("Os") == "linux" and
+                   image.get("Architecture") == "amd64" and
+                   repository + "@" + ref.split("@", 1)[1] in image.get("RepoDigests", []) and
+                   SHA_RE.fullmatch(revision) and
+                   image["Config"]["Labels"].get("org.opencontainers.image.source") ==
+                   "https://github.com/aculledor/CeboDePemento" and
+                   (not REF_RE.fullmatch(ref) or REF_RE.fullmatch(ref).group(1) == revision), "oci-provenance")
+    config = json_object(compose("config", "--format", "json", overrides={"APP_IMAGE": ref}, timeout=30))
+    backup_require(config["name"] == "cebo-pemento" and config["services"]["app"]["image"] == ref,
+                   "compose-identity")
+    service = config["services"]["app"]
+    backup_require(not service.get("build"), "compose-build-forbidden")
+    mounts = service.get("volumes", [])
+    backup_require(len(mounts) == 1 and mounts[0]["type"] == "volume" and
+                   mounts[0]["target"] == "/app/data" and not mounts[0].get("read_only"), "compose-data-mount")
+    volume = config["volumes"][mounts[0]["source"]]
+    backup_require(volume.get("external") is True and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]+", volume["name"]),
+                   "volume-name")
+    actual = [m for m in container["Mounts"] if m["Type"] != "tmpfs"]
+    backup_require(len(actual) == 1 and actual[0]["Type"] == "volume" and
+                   actual[0]["Name"] == volume["name"] and actual[0]["Destination"] == "/app/data" and
+                   actual[0]["RW"] is True and
+                   all(m["Destination"] == "/tmp" for m in container["Mounts"] if m["Type"] == "tmpfs"), "container-data-mount")
+    info = json.loads(run("/usr/bin/docker", "volume", "inspect", volume["name"], timeout=30))
+    backup_require(len(info) == 1 and info[0]["Name"] == volume["name"] and info[0]["Driver"] == "local" and
+                   not info[0].get("Options") and PurePosixPath(info[0]["Mountpoint"]).is_absolute() and
+                   actual[0]["Source"] == info[0]["Mountpoint"], "volume-identity")
+    environment = service["environment"]
+    runtime_env = {}
+    for item in container["Config"]["Env"]:
+        key, separator, value = item.partition("=")
+        backup_require(separator and key and key not in runtime_env, "container-environment-ambiguous")
+        runtime_env[key] = value
+    database = data_relative(environment["DATABASE_PATH"])
+    photos = data_relative(environment["PHOTO_DIRECTORY"])
+    backup_require(all(runtime_env.get(key) == environment[key] for key in ("DATABASE_PATH", "PHOTO_DIRECTORY")),
+                   "container-data-environment")
+    proof = backup_state(ref, revision, image_env["APP_IMAGE"], config, info[0]["Mountpoint"], database, photos)
+    data = Path(info[0]["Mountpoint"])
+    for relative in (database, photos):
+        path = data / relative
+        backup_require(not any(part.is_symlink() for part in (*path.parents, path)), "data-symlink")
+    # openDatabase() can initialize a missing DB: never let a scheduled backup
+    # silently archive a newly seeded database instead of the live dataset.
+    backup_require((data / database).is_file(), "database-missing")
+    backup_require((data / photos).is_dir() if present(data / photos) or proof["mode"] != "legacy" else True,
+                   "photos-missing-or-type")
+    return {"image": ref, "revision": revision, "container_id": ids[0], "image_id": image["Id"],
+            "volume": volume["name"], "database": str(database), "photos": str(photos), "specops": proof}
+
+
+def backup(old_image, verified=None):
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     BACKUPS.mkdir(mode=0o700, parents=True, exist_ok=True)
     trusted(BACKUPS)
     directory = BACKUPS / stamp
     directory.mkdir(mode=0o700)
     for name in (".env", "image.env", "compose.yaml"):
-        atomic(directory / name, (PROJECT / name).read_text())
-    output = compose("run", "--rm", "--no-deps", "--entrypoint", "node", "app",
+        content = f"APP_IMAGE={old_image}\n" if verified and name == "image.env" else (PROJECT / name).read_text()
+        atomic(directory / name, content)
+    # compose run has no --no-build flag. The selected config must have no build
+    # section, its exact image is already local, and pulling is forbidden.
+    offline = ("--pull", "never") if verified else ()
+    output = compose("run", "--rm", "--no-deps", *offline, "--entrypoint", "node", "app",
                      "apps/api/dist/cli.js", "backup", overrides={"APP_IMAGE": old_image})
     result = json.loads(output)
     snapshot = result["directory"]
@@ -143,12 +334,14 @@ def backup(old_image):
         raise DeployError("Ruta de snapshot inesperada")
     config = env_values((PROJECT / ".env").read_text())
     volume = config.get("DATA_VOLUME", "cebo_pemento_data")
+    if verified:
+        backup_require(volume == verified["volume"], "backup-volume-drift")
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]+", volume):
         raise DeployError("Volumen no admitido")
     helper = "cebo-export-" + uuid.uuid4().hex
     created = False
     try:
-        run("/usr/bin/docker", "create", "--name", helper, "--mount",
+        run("/usr/bin/docker", "create", *(("--pull=never",) if verified else ()), "--name", helper, "--mount",
             f"type=volume,src={volume},dst=/app/data,readonly", "--entrypoint", "node", old_image, "-e", "")
         created = True
         run("/usr/bin/docker", "cp", f"{helper}:{snapshot}", str(directory / "snapshot"))
@@ -156,7 +349,10 @@ def backup(old_image):
         if created:
             run("/usr/bin/docker", "rm", helper)
     # Snapshot includes a consistent SQLite file and local photos; no token output.
-    atomic(directory / "release.json", json.dumps({"image": old_image, "snapshot": snapshot}))
+    if verified:
+        backup_require(active_backup() == verified, "runtime-changed-during-backup")
+    atomic(directory / "release.json", json.dumps({"image": old_image, "snapshot": snapshot,
+                                                  **({"version": 2, "runtime": verified} if verified else {})}))
     return directory, snapshot
 
 
@@ -219,6 +415,12 @@ def main():
         raise DeployError("Instalar y ejecutar explícitamente como root")
     for path in (PROJECT, PROJECT / "deploy", PROJECT / "compose.yaml", PROJECT / "deploy/Caddyfile", PROJECT / ".env", PROJECT / "image.env", PROJECT / "ca.crt"):
         trusted(path, path.name in (".env", "image.env"))
+    if args.backup:
+        with open(GLOBAL_LOCK, "a+") as lock:
+            acquire_lock(lock, backup_mode=True)
+            selected = active_backup()
+            print("Backup verificado:", backup(selected["image"], verified=selected)[0])
+        return
     image_env = env_values((PROJECT / "image.env").read_text())
     if set(image_env) != {"APP_IMAGE"} or not REF_RE.fullmatch(image_env["APP_IMAGE"]):
         raise DeployError("image.env debe contener solamente APP_IMAGE por digest")
@@ -231,14 +433,11 @@ def main():
         if GATE.read_text().strip() != "enabled":
             raise DeployError("Actualización automática no autorizada localmente")
     # Share the existing infrastructure lock; never invoke its deploy script.
-    with open("/run/lock/servidor-casa-deploy.lock", "a+") as lock:
+    with open(GLOBAL_LOCK, "a+") as lock:
         if not acquire_lock(lock, backup_mode=args.backup):
             print("Otro GitOps está ocupado; se reintentará en el siguiente ciclo")
             return
         old = image_env["APP_IMAGE"]
-        if args.backup:
-            print("Backup verificado:", backup(old)[0])
-            return
         git = ("/usr/sbin/runuser", "-u", "servidor", "--", "/usr/bin/git", "-C", str(REPO))
         remote = run(*git, "remote", "get-url", "origin")
         if remote not in ("https://github.com/aculledor/CeboDePemento.git", "git@github.com:aculledor/CeboDePemento.git"):
